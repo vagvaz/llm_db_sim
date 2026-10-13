@@ -59,3 +59,7 @@ _Avoid_: config profile (ambiguous with QueryProfile)
 **Sweep**:
 A factorial run that enumerates a cross product of factor values over a base scenario, producing one run directory per combination.
 _Avoid_: batch, experiment run
+
+**Trace**:
+The lifecycle record of requests in the system: one event per state transition, keyed by agent_id and request_id, from which all derived metrics are computed.
+_Avoid_: log, event log

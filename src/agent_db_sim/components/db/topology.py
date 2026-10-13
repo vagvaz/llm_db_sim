@@ -11,7 +11,10 @@ All topologies are SimKit children of :class:`DBEndpoint`:
   of Coordinator nodes front peer queries (queries round-robined across
   coordinators); every coordinator holds a per-link connection to every peer
   (own bandwidth/latency). ``db.network.coordinator_overhead`` multiplies the
-  coordinator node's compute complexity.
+  coordinator node's compute complexity. ``db.network.connections`` bounds
+  every network link's connection pool (one connection per query per link,
+  held for the query's whole round trip; default 0 = unlimited — no
+  ``net_conn`` stage is traced and behavior is unchanged).
 
 Scale-out (map notes): growing ``db.compute_nodes`` (N) or ``db.storage_nodes``
 (M) only changes the node counts — per-node params stay untouched.

@@ -9,8 +9,11 @@ Conventions set in ticket 05 / the wired ticket-10 contract:
 - Lifecycle edge samples: ``{component path}.{stage}`` with
   ``agent_id``/``request_id`` tags and states
   ``submitted|queued|processing|completed``; stages follow ticket 04's
-  taxonomy (``compute_issue``, ``net_req``, ``storage_queue``,
-  ``storage_service``, ``net_resp``, ``compute_finalize``).
+  taxonomy (``compute_issue``, ``net_req``, ``net_conn``,
+  ``storage_queue``, ``storage_service``, ``net_resp``,
+  ``compute_finalize``). ``net_conn`` appears onkt on links with a bounded
+  connection pool (``db.network.connections``) and records the wait-in-
+  connection-queue contribution.
 """
 
 from agent_db_sim.components.db.backend import (

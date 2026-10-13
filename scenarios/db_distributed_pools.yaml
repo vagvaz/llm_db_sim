@@ -1,0 +1,32 @@
+# db_distributed_pools.yaml - demonstration scenario for the
+# connections-as-a-resource model: the distributed topology of
+# db_distributed.yaml with a bounded connection pool (2 connections) on
+# every coordinator-peer link. A query acquires one connection from the
+# link's pool before its first transfer and holds it for the whole round
+# trip; excess queries wait in the link's connection queue (the net_conn
+# trace stage; conn_busy level signal drives the VCD utilization view).
+# NOTE: db_distributed.yaml (connections absent -> unlimited) is unchanged,
+# so existing acceptance expectations and sweeps stay bit-identical.
+
+sim:
+  until: 100.0
+  seed: 0
+
+db:
+  topology: distributed
+  compute_nodes: 4      # node pairs (2 coordinators + 2 peers)
+  coordinators: 2
+  compute:
+    slots: 2
+    ingress: fifo
+    issue_ratio: 0.1
+    phase_split: three_phase
+  storage:
+    backend: nvme
+  network:
+    latency: 0.001
+    bandwidth: 1000.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.1
+    connections: 2      # bounded connection pool per coordinator-peer link

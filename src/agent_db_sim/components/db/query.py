@@ -100,8 +100,9 @@ class QueryResponse:
     """What a caller receives for one submitted query.
 
     ``stages`` maps stage names from ticket 04's taxonomy
-    (``compute_issue``, ``net_req``, ``storage_queue``, ``storage_service``,
-    ``net_resp``, ``compute_finalize``) to their per-hop timings. ``queue_time``
+    (``compute_issue``, ``net_req``, ``net_conn``, ``storage_queue``,
+    ``storage_service``, ``net_resp``, ``compute_finalize``) to their
+    per-hop timings. ``queue_time``
     is the request's compute-slot wait; ``service_time`` is the whole slot-hold
     envelope (issue + storage round-trip + finalize, option b).
     """

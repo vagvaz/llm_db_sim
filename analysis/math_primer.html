@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Math Behind the Agent–DB Analyzer — guided primer</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151a21; --panel2:#1b222c; --border:#262e3a;
+    --text:#d7dde6; --muted:#8b95a3; --accent:#5aa9e6; --accent2:#8fd3ff;
+    --good:#4cc38a; --warn:#e5b45a; --bad:#e05d5d; --grid:#232b37;
+    --mono:ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.6}
+  header{padding:26px 30px 10px;max-width:980px;margin:0 auto}
+  header h1{font-size:21px;font-weight:700;margin:0 0 6px}
+  header p{color:var(--muted);font-size:13.5px;margin:0}
+  nav{max-width:980px;margin:10px auto 0;padding:0 30px;font-size:12.5px;color:var(--muted)}
+  nav a{color:var(--accent2);text-decoration:none;margin-right:14px}
+  nav a:hover{text-decoration:underline}
+  main{max-width:980px;margin:16px auto 40px;padding:0 30px}
+  section{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px 24px;margin-bottom:18px}
+  h2{font-size:16px;margin:0 0 10px;color:var(--accent2)}
+  h3{font-size:13.5px;margin:16px 0 6px;color:var(--text)}
+  p{margin:8px 0}
+  ul{margin:8px 0;padding-left:20px}
+  li{margin-bottom:5px}
+  .formula{background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--accent);
+    border-radius:8px;padding:12px 16px;margin:10px 0;font-family:var(--mono);font-size:13.5px;overflow-x:auto}
+  .formula .note{font-family:system-ui,sans-serif;font-size:12px;color:var(--muted);margin-top:6px}
+  table{border-collapse:collapse;width:100%;font-size:12.8px}
+  th{color:var(--muted);text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:bottom}
+  td{padding:7px 10px;border-bottom:1px solid var(--grid);vertical-align:top}
+  td:first-child{white-space:nowrap}
+  td.sym{font-family:var(--mono);color:var(--accent2);white-space:nowrap}
+  .tag{display:inline-block;font-size:10px;padding:1px 7px;border-radius:9px;border:1px solid;margin-left:6px;vertical-align:middle}
+  .tag.free{color:var(--good);border-color:var(--good)}
+  .tag.pay{color:var(--warn);border-color:var(--warn)}
+  a{color:var(--accent2)}
+  code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:11.8px;font-family:var(--mono)}
+  .box{border:1px dashed var(--border);border-radius:10px;padding:12px 16px;margin:10px 0}
+  .ex{color:var(--warn)}
+  .foot{color:var(--muted);font-size:11.5px;text-align:center;padding:0 30px 30px;max-width:980px;margin:0 auto}
+  sub,sup{font-size:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>The Math Behind the Agent–DB Analyzer</h1>
+  <p>A guided tour of every formula the analyzer uses — what each one means, why it is there,
+     and where it comes from. Read alongside <code>analysis/agent_db_sim_analyzer.html</code>;
+     all anchors cross-checked by <code>analysis/verify_core.js</code>.</p>
+</header>
+<nav>
+  <a href="#s1">1 · the model</a>
+  <a href="#s2">2 · glossary</a>
+  <a href="#s3">3 · one endpoint</a>
+  <a href="#s4">4 · closed loop</a>
+  <a href="#s5">5 · Buzen</a>
+  <a href="#s6">6 · latency</a>
+  <a href="#s7">7 · arrivals &amp; bottleneck</a>
+  <a href="#s8">8 · DES/MC</a>
+  <a href="#s9">9 · verification</a>
+  <a href="#refs">references</a>
+</nav>
+
+<main>
+
+<section id="s1">
+  <h2>1 · The model in one picture</h2>
+  <p>Agents are <b>closed-loop customers</b>: each of <span class="sym">N</span> agents repeatedly cycles</p>
+  <div class="formula">think τ<sub>think</sub> &nbsp;→&nbsp; LLM call (τ<sub>LLM</sub>, c<sub>LLM</sub> servers) &nbsp;→&nbsp; DB query (τ<sub>DB</sub>, c<sub>DB</sub> servers) &nbsp;→&nbsp; repeat</div>
+  <p>No agent is created or destroyed — the same N agents circulate forever. That feedback makes
+     the load <b>endogenous</b>: if agents queue up at the LLM endpoint, fewer agents reach the DB,
+     so the DB arrival rate drops. Any correct model must solve this loop <i>simultaneously</i>,
+     which is why simple textbook open-queue formulas (M/M/c applied station by station) are wrong here
+     — and why the closed-network machinery of §4 exists.</p>
+  <p>The repo's <b>DES simulator</b> (SimPy) reconstructs the same loop by explicit event simulation;
+     the analyzer computes the same steady state <em>without</em> simulating, and the page includes
+     an in-browser DES engine (the Monte Carlo tab) so both approaches can be compared.</p>
+</section>
+
+<section id="s2">
+  <h2>2 · Glossary — every symbol and acronym on the page</h2>
+  <table>
+    <thead><tr><th>symbol / term</th><th>name</th><th>plain meaning</th></tr></thead>
+    <tbody>
+      <tr><td class="sym">N</td><td>population</td><td>number of agents circulating in the closed loop.</td></tr>
+      <tr><td class="sym">τ<sub>s</sub></td><td>service time</td><td>average wall-clock time one job occupies one server at station s (LLM call or DB query). Greek tau = "time".</td></tr>
+      <tr><td class="sym">c<sub>s</sub></td><td>servers</td><td>how many jobs station s processes simultaneously (queueing-invitation for the rest).</td></tr>
+      <tr><td class="sym">c²<sub>s</sub></td><td>SCV (squared coefficient of variation)</td><td>service-time variability: variance/mean². 1 = exponential (fully random), 0 = constant, &gt;1 = spiky (e.g. token-count-dependent queries).</td></tr>
+      <tr><td class="sym">M/M/c</td><td>queueing notation</td><td>Kendall's A/B/C notation: [arrival process]/[service process]/[servers]. M = Markovian (exponential); M/M/c = Poisson arrivals, exponential service, c servers — the exact base case.</td></tr>
+      <tr><td class="sym">M/G/c</td><td>general service</td><td>Same but "G" = any service distribution (summarized by its mean and SCV).</td></tr>
+      <tr><td class="sym">IS</td><td>infinite-server station</td><td>a station with as many servers as jobs (nobody ever queues there) — the think-time stage is modelled this way.</td></tr>
+      <tr><td class="sym">FCFS</td><td>first-come-first-served</td><td>queue discipline: longest-waiting job takes the next freed server.</td></tr>
+      <tr><td class="sym">λ, X</td><td>throughput</td><td>loop completions per second. In the closed chain every station is visited exactly once per loop, so <b>every station sees arrival rate X</b> — flow balance.</td></tr>
+      <tr><td class="sym">ρ<sub>s</sub></td><td>utilization</td><td>per-server busy fraction = X·τ<sub>s</sub>/c<sub>s</sub>. &lt;1 always for finite closed loops, →1 means saturation.</td></tr>
+      <tr><td class="sym">W<sub>q,s</sub></td><td>queue wait</td><td>average pure waiting time (excludes service) experienced at station s.</td></tr>
+      <tr><td class="sym">R<sub>s</sub></td><td>sojourn time</td><td>total time one visit spends inside station s: <b>R = τ + W<sub>q</sub></b>.</td></tr>
+      <tr><td class="sym">L<sub>s</sub>, L<sub>q,s</sub></td><td>queue lengths</td><td>average number of agents at (and waiting in) station s at a random instant. Little's Law connects everything.</td></tr>
+      <tr><td class="sym">π<sub>s</sub> / π̂, μ̂</td><td>wait mixture params</td><td>model of the wait distribution: P(wait=0) = 1−π̂; given waiting, wait ~ Exp(μ̂). Calibrated to reproduce the exact mean wait.</td></tr>
+      <tr><td class="sym">p50…p99</td><td>percentiles</td><td>of the <b>end-to-end loop latency</b> distribution: p95 means 95% of loops finish within it.</td></tr>
+      <tr><td class="sym">G(N)</td><td>normalization constant</td><td>sum Buzen computes to normalize the product-form state law (§4–5).</td></tr>
+      <tr><td class="sym">BCMP</td><td>Baskett–Chandy–Muntz–Palacios</td><td>the theorem stating which station types keep closed networks product-form (our M/M/c FCFS + IS nodes qualify).</td></tr>
+      <tr><td class="sym">CTMC, DES, MC</td><td>continuous-time Markov chain / discrete-event simulation / Monte Carlo</td><td>independent ways to obtain the same numbers: exact Markov-chain solve (verification only, too big for real sizes), event-by-event simulation (browser MC tab), and the analytic method (Buzen).</td></tr>
+      <tr><td class="sym">knee</td><td>capacity knee</td><td>agent count where mean latency starts growing fastest — the practical capacity limit.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="s3">
+  <h2>3 · One endpoint alone — Erlang C and the M/G/c correction</h2>
+  <p>Temporary simplification: fix the rate at which jobs <i>arrive</i> to one station (λ = X) and
+     look at that station in isolation with c identical servers.</p>
+  <h3>Erlang C — the exact M/M/c waiting probability (1917)</h3>
+  <div class="formula">
+    offered load: a = λ·τ &nbsp;&nbsp; per-server load: ρ = a/c<br><br>
+    blocking (Erlang B) recursion: B<sub>0</sub>=1; &nbsp; B<sub>k</sub> = a·B<sub>k−1</sub> / (k + a·B<sub>k−1</sub>)<br>
+    wait probability: π = C(c,a) = B<sub>c</sub> / (1 − ρ·(1−B<sub>c</sub>))<br>
+    mean wait: W<sub>q</sub> = π / (c/τ − λ)<br>
+    <span class="note">Reads: "π is the chance all servers are busy when you arrive; once waiting, the server completion
+    stream drains at rate c/τ − λ." The B-recursion avoids the numerically explosive a<sup>c</sup>/c! form.</span>
+  </div>
+  <p class="ex">Sanity anchors we assert in the suite: C(1, 0.5) = 0.5, C(2, 1) = ⅓, C(5, 3) ≈ 0.2362.</p>
+
+  <h3>General service (M/G/c): the Allen–Cunneen / Kingman correction</h3>
+  <p>Erlang C is exact only for exponential service (SCV = 1). Kingman's heavy-traffic result says
+     waits grow with <span class="sym">(c²<sub>a</sub> + c²<sub>s</sub>)/2</span> — the sum of arrival- and
+     service-time variability. The engineering approximation (Allen–Cunneen; Whitt's QNA) multiplies the
+     mean wait by exactly that factor; with Poisson-like closed-loop arrivals (c²<sub>a</sub> ≈ 1):</p>
+  <div class="formula">W<sub>q,M/G/c</sub> ≈ W<sub>q,M/M/c</sub> · (1 + c²<sub>s</sub>)/2 &nbsp;&nbsp; <span class="note">over-inflated waits for spiky service (c²<sub>s</sub>&gt;1), correctly shrunk for deterministic-like service (c²<sub>s</sub>→0).</span></div>
+</section>
+
+<section id="s4">
+  <h2>4 · The closed loop — why feedback changes everything (Gordon–Newell, BCMP)</h2>
+  <p>In the loop, each station's arrival rate depends on the other stations' waiting times
+     (X = N / (τ<sub>think</sub> + R<sub>LLM</sub> + R<sub>DB</sub>)). The fix is an old and beautiful one:</p>
+  <div class="formula">
+    <b>Gordon–Newell (1967):</b> &nbsp; p(n<sub>0</sub>,…,n<sub>K</sub>) = (1/G(N)) · ∏<sub>stations i</sub> f<sub>i</sub>(n<sub>i</sub>)<br><br>
+    station weight: &nbsp; f<sub>i</sub>(n) = ∏<sub>m=1..n</sub> τ<sub>i</sub>/min(m, c<sub>i</sub>)<br>
+    &nbsp;&nbsp; = τⁿ/n! &nbsp;for n ≤ c &nbsp;&nbsp;|&nbsp;&nbsp; (τ<sup>c</sup>/c!)·(τ/c)<sup>n−c</sup> &nbsp;for n &gt; c<br>
+    think stage (IS): &nbsp; f<sub>think</sub>(n) = τ<sup>n</sub>/n!
+  </div>
+  <p>The state probability of the <b>whole network</b> factors into per-station weights — this is the
+     <i>product form</i>. It holds exactly for exponential service FCFS multiserver stations and
+     infinite-server nodes (the <b>BCMP theorem</b> details which other types are allowed).
+     G(N) is just the sum of the weights over all ways to place N agents across stations.</p>
+
+  <div class="box">
+    <b>Worked micro-example (same numbers our test suite asserts):</b> two M/M/1 stations τ = 1, N = 2 agents, no think.
+    States: agents split (2,0), (1,1), (0,2) — all weights equal (τⁿ = 1) so each has probability ⅓.
+    Departures happen only when a station is populated: X = 2/3 loops/s, every station holds L = 2/3·2/2 = 1 agent on average,
+    so R = L/X = 1.5 s and W<sub>q</sub> = 0.5 s. Try the open M/M/1 formula instead and you get a very different (wrong) answer —
+    that's the feedback at work.
+  </div>
+</section>
+
+<section id="s5">
+  <h2>5 · Buzen's convolution — computing G(N) and the full marginals</h2>
+  <p>Multiplying out the product form naive-Bayes-in-Haskell style would enumerate every split of N agents among stations.
+     Buzen's convolution instead folds the network station by station:</p>
+  <div class="formula">
+    prefix: &nbsp; F<sub>k</sub>(m) = Σ<sub>j≤m</sub> F<sub>k−1</sub>(m−j) · f<sub>k</sub>(j) &nbsp;&nbsp; (F<sub>0</sub> = δ at 0)<br>
+    after the last station, &nbsp; G(N) = F<sub>K</sub>(N)<br>
+    marginal of station i: &nbsp; π<sub>i</sub>(n) = f<sub>i</sub>(n) · H<sub>i</sub>(N−n) / G(N), &nbsp; H<sub>i</sub> = convolution of all stations <b>except i</b><br>
+    throughput &amp; occupancy: &nbsp; X = Σ<sub>n</sub> μ<sub>i</sub>(n)·π<sub>i</sub>(n) = Σ min(n,c<sub>i</sub>)/τ<sub>i</sub> · π<sub>i</sub>(n), &nbsp; then R<sub>i</sub> = L<sub>i</sub>/X (Little)
+  </div>
+  <ul>
+    <li>Computing all marginals needs prefix-and-suffix convolutions — O(K·N²) total, exact, milliseconds for our sizes.</li>
+    <li>We compute in <b>log-space weights</b> to dodge float under/overflow of τⁿ/n!.</li>
+    <li>Every assertion in <code>verify_core.js</code> is a check of this path against
+        <b>independent brute-force CTMC stationary solves</b> (§9) — including the K=3 chains your
+        decomposed-DB topology produces (§7).</li>
+  </ul>
+</section>
+
+<section id="s6">
+  <h2>6 · Latency percentiles — the calibrated wait-mixture model</h2>
+  <p>Buzen gives <b>exact means</b>, not distributions. For percentiles the analyzer builds a closed-form
+     model of each station's wait:</p>
+  <div class="formula">
+    wait ⟶ mixture: &nbsp; W = 0 &nbsp;with prob (1−π̂); &nbsp; W ~ Exp(μ̂) &nbsp;with prob π̂<br>
+    closed-chain tail rate: &nbsp; μ̂ = c/τ &nbsp; <span class="note">a waiting agent in a closed chain sees <i>all</i> c servers busy —
+        the completion stream therefore runs at c/τ, not c/τ−λ as in an open chain (chosen empirically vs MC: §9)</span>.<br>
+    calibration: &nbsp; π̂ = μ̂·W<sub>exact</sub> &nbsp;(≤1) &nbsp;— &nbsp; pinned so the mixture's <b>mean</b> equals the exact Buzen wait: E[W] = π̂/μ̂ = W<sub>exact</sub><br><br>
+    end-to-end latency: &nbsp; L = think ~ Exp(τ<sub>think</sub>) &nbsp;⊛&nbsp; (τ<sub>s1</sub> + W<sub>s1</sub>) &nbsp;⊛&nbsp; … &nbsp;⊛&nbsp; (τ<sub>sK</sub> + W<sub>sK</sub>) &nbsp;+ const
+  </div>
+  <p>The convolution of these phase distributions runs numerically on a uniform grid (the "grid points"
+     parameter); percentiles are read off the CDF. Because each μ̂ is matched to the exact mean wait,
+     the <b>mean of the percentile engine always equals the exact chain mean</b> (asserted ≤1%). The upper
+     percentiles approximate truth (±10–15% vs Monte Carlo — calibrated rate chosen by bake-off;
+     for exact numbers switch to the MC tab).
+  </p>
+</section>
+
+<section id="s7">
+  <h2>7 · Arrival distributions and bottleneck detection</h2>
+  <h3>What do agents see when they hit the DB? (arrival theorem)</h3>
+  <div class="formula">
+    <b>arrival (Lavenberg–Reiser / Reiser) theorem:</b> in a closed product-form chain,
+    an arriving job at station i sees the network distributed as the equilibrium of the <b>same chain with one agent removed</b> (N−1):<br><br>
+    π<sup>arr</sup><sub>i</sub>(n) = f<sub>i</sub>(n) · H<sub>i</sub><sup>(N−1)</sup>(N−1−n) / G<sup>(N−1)</sup>(N−1)
+  </div>
+  <p>Same convolution machinery, evaluated at population N−1 — this gives the exact <b>occupancy distribution
+     at DB-arrival instants</b> (the "arrival distribution on the DB" the DES traces report), not merely a mean.</p>
+  <h3>Which endpoint is the bottleneck?</h3>
+  <div class="formula">
+    bottleneck = argmax<sub>i</sub> ρ<sub>i</sub> &nbsp;&nbsp; queue-delay share = W<sub>q,i</sub> / (τ<sub>think</sub> + Σ R<sub>k</sub>)
+  </div>
+  <ul>
+    <li><b>ρ ranking</b> identifies the gate: capacity added elsewhere buys little until the max-ρ station is relieved (add servers c, cut τ, or cut its traffic by re-sequencing the loop).</li>
+    <li>The <b>delay share</b> splits the loop budget: how much of each cycle is pure waiting at each station.</li>
+    <li>The <b>knee</b> in the sweep chart (§6) marks the agent count where latency growth accelerates — plan capacity below it; the roadmap ticket on "bottleneck attribution" (DES side) tracks the same decomposition from traces.</li>
+  </ul>
+</section>
+
+<section id="s8">
+  <h2>8 · DES / Monte Carlo — the empirical twin</h2>
+  <p>The MC tab runs the same stochastic model by <b>discrete-event simulation</b>: agents and station servers
+     live on an event list processed in time order; every endpoint is an exact FCFS M/G/c queue (server counts,
+     FIFO queues). Service times draw from a <b>Gamma sampler</b> whose shape is fixed by the SCV dial
+     (1 = exponential, 0 = deterministic; Marsaglia–Tsang 2000), think times exponential.</p>
+  <ul>
+    <li>Warm-up: the first fraction of completed cycles is discarded so starting transients don't bias percentiles.</li>
+    <li>Statistical error of percentiles is O(1/√cycles) — 20k cycles keep tile jitter small; same seed reproduces the run exactly.</li>
+    <li><b>Why compare at SCV = 1:</b> the analytic engine is exact there (product form holds for exponential think+service), so the DES should agree with it within sampling error — a strong mutual test. At SCV ≠ 1 the DES is the ground truth and the analytical engines are approximations.</li>
+  </ul>
+</section>
+
+<section id="s9">
+  <h2>9 · How we know the numbers are right — verification map</h2>
+  <table>
+    <thead><tr><th>claim</th><th>evidence</th></tr></thead>
+    <tbody>
+      <tr><td>Erlang C implemented correctly</td><td>three textbook values asserted (C(1,.5)=.5, C(2,1)=⅓, C(5,3)≈.2362)</td></tr>
+      <tr><td>closed-chain solver exact</td><td><b>independent brute-force CTMC stationary solves</b> — build the full generator for small N (enumerate the state space), solve the linear system exactly, solve the linear system exactly, compare: symmetric, asymmetric, decomposed-DB chains all match Buzen to 1e-6</td></tr>
+      <tr><td>textbook case reproduced</td><td>closed M/M/1//2: X = 2/3, L = 1, R = 1.5 (same numbers as the worked example in §4)</td></tr>
+      <tr><td>DES engine faithful</td><td>MC X/means within 0.5–3% of the exact analytic chain at SCV=1 (seeded, reproducible runs)</td></tr>
+      <tr><td>samplers healthy</td><td>gamma/exp sampler mean &amp; variance checked at SCV ∈ {0.5, 1, 2.5}</td></tr>
+      <tr><td>page itself healthy</td><td>headless smoke test runs the page scripts against a stub DOM</td></tr>
+    </tbody>
+  </table>
+  <p>Run everything with <code>node analysis/verify_core.js</code> and <code>node analysis/smoke_page.js</code>.</p>
+</section>
+
+<section id="refs">
+  <h2>11 · References & digital views</h2>
+  <p>Each row: what the work established → where we use it → link(s). Links verified; tags show
+     <span class="tag free">free access</span>/<span class="tag pay">paywalled</span>.</p>
+  <table>
+    <thead><tr><th>reference</th><th>what we use it for</th><th>digital view</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>A. K. Erlang (1917), <i>Løsning af nogle Problemer…</i> (A. F. Math. Phys.)</td>
+        <td>the M/M/c wait structure (Erlang C) behind every station's wait mixture and per-server formulas</td>
+        <td>
+          <a href="https://en.wikipedia.org/wiki/Erlang_(unit)">Erlang C — Wikipedia</a><span class="tag free">free</span> ·
+          <a href="https://en.wikipedia.org/wiki/Erlang_distribution">Erlang distribution</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>J. D. C. Little (1961), <i>A Proof for the Queuing Formula: L = λW</i>, Operations Research 9(3), 383–387</td>
+        <td>Little's Law — R<sub>i</sub> = L<sub>i</sub>/X turns Buzen occupancies into sojourn times</td>
+        <td>
+          <a href="https://doi.org/10.1287/opre.9.3.383">DOI 10.1287/opre.9.3.383</a><span class="tag pay">paywalled</span> ·
+          <a href="https://en.wikipedia.org/wiki/Little%27s_law">Little's law — Wikipedia</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>W. J. Gordon, G. F. Newell (1967), <i>Closed Queuing Systems with Exponential Servers</i>, Operations Research 15(2), 254–265</td>
+        <td>the product-form steady state of the closed agent loop (§4)</td>
+        <td>
+          <a href="https://doi.org/10.1287/opre.15.2.254">DOI 10.1287/opre.15.2.254</a><span class="tag pay">paywalled</span> ·
+          <a href="https://en.wikipedia.org/wiki/Gordon%E2%80%93Newell_theorem">Gordon–Newell theorem — Wikipedia</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>J. P. Buzen (1973), <i>Computational Algorithms for Closed Queueing Networks with Exponential Servers</i>, Comm. ACM 16(9), 527–531</td>
+        <td>the convolution algorithm that computes G(N) and marginals exactly (§5)</td>
+        <td>
+          <a href="https://doi.org/10.1145/362342.362345">DOI 10.1145/362342.362345</a><span class="tag pay">paywalled</span> ·
+          <a href="https://en.wikipedia.org/wiki/Buzen%27s_algorithm">Buzen's algorithm — Wikipedia (incl. fuller treatment)</a><span class="tag free">free</span> ·
+          <a href="https://docs.lib.purdue.edu/cgi/viewcontent.cgi?article=1164&context=cstech">scan collection reference list (Purdue e-Pubs, Operational Analysis era)</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>F. Baskett, K. M. Chandy, R. R. Muntz, F. G. Palacios (1975), <i>Open, Closed, and Mixed Networks of Queues…</i>, J. ACM 22(2), 248–265</td>
+        <td>the BCMP theorem: which station types (our FCFS M/M/c and IS nodes) keep the closed chain product-form</td>
+        <td>
+          <a href="https://doi.org/10.1145/321879.321887">DOI 10.1145/321879.321887</a><span class="tag pay">paywalled</span> ·
+          <a href="https://en.wikipedia.org/wiki/BCMP_network">BCMP network — Wikipedia</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>M. Reiser, S. S. Lavenberg (1980), <i>Mean-Value Analysis of Closed Multichain Queueing Networks</i>, J. ACM 27(2), 313–322</td>
+        <td>arrival theorem source (§7): an arrival sees the chain with itself removed; also the alternative recursive algorithm (MVA)</td>
+        <td>
+          <a href="https://en.wikipedia.org/wiki/Mean_value_analysis">Mean value analysis — Wikipedia</a><span class="tag free">free</span> ·
+          <a href="https://academic.microsoft.com/">search "Mean-Value Analysis of Closed Multichain Queueing Networks" on your favourite scholar index for open copies</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>P. J. Denning, J. P. Buzen (1978), <i>The Operational Analysis of Queueing Network Models</i>, ACM Comp. Surv. 10(3)</td>
+        <td>the operational-analysis frame (flow balance, utilization accounting) that underlies the derived tiles</td>
+        <td>
+          <a href="https://doi.org/10.1145/356733.356735">DOI 10.1145/356733.356735</a><span class="tag pay">paywalled</span> ·
+          <a href="https://docs.lib.purdue.edu/cgi/viewcontent.cgi?article=1164&context=cstech">companion scan (Purdue e-Pubs)</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>J. F. C. Kingman (1961), heavy-traffic limit; Allen &amp; Cunneen approximation formula</td>
+        <td>the (c²<sub>a</sub>+c²<sub>s</sub>)/2 wait inflation used for SCV ≠ 1 (§3)</td>
+        <td>
+          <a href="https://en.wikipedia.org/wiki/Kingman%27s_formula">Kingman's formula — Wikipedia</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>W. Whitt (1983), <i>The Queueing Network Analyzer</i>, Bell System Tech. J. 62(9), 2779–2815</td>
+        <td>the engineering QNA framework for M/G/c networks — the same spirit as our SCV corrections</td>
+        <td>
+          <a href="https://en.wikipedia.org/wiki/Queueing_theory">Queueing theory — Wikipedia (context)</a><span class="tag free">free</span> · citation: BSTJ 62(9):2779–2815
+        </td>
+      </tr>
+      <tr>
+        <td>G. Marsaglia, W. Tsang (2000), <i>A Simple Method for Generating Gamma Variables</i>, ACM TOMS 26(3), 363–372</td>
+        <td>the Gamma sampler behind arbitrary-SCV service times in the DES tab (§8)</td>
+        <td>
+          <a href="https://dl.acm.org/doi/10.1145/358407.358414">DOI 10.1145/358407.358414</a><span class="tag pay">paywalled</span> ·
+          <a href="https://en.wikipedia.org/wiki/Gamma_distribution#Random_variate_generation">Gamma variate generation — Wikipedia</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>G. Bolch et al. (2006), <i>Queueing Networks and Markov Chains</i>, Wiley</td>
+        <td>the single-volume compendium covering Buzen, MVA, BCMP and M/G/c approximations with worked numerics</td>
+        <td>
+          <a href="https://en.wikipedia.org/wiki/Queueing_network">Queueing network — Wikipedia</a><span class="tag free">free</span>
+        </td>
+      </tr>
+      <tr>
+        <td>E. D. Lazowska, J. Zahorjan, G. S. Graham, K. C. Sevcik (1984), <i>Quantitative System Performance</i>, Prentice-Hall</td>
+        <td>the classic free-ebook treatment of closed-network MVA/convolution practice</td>
+        <td>
+          <a href="https://homes.cs.washington.edu/~lazowska/qsp/">author page hosting the full text — chapter PDFs &amp; complete zip (UW CS)</a><span class="tag free">free</span>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="hint" style="color:var(--muted)">DOI links resolve on doi.org; where a paper sits behind a paywall the key formula
+     (which is not copyrightable) is reproduced in the relevant section above with attribution.</p>
+</section>
+
+</main>
+<footer class="foot">analysis/math_primer.html · companion to analysis/agent_db_sim_analyzer.html · verify with node analysis/verify_core.js</footer>
+</body>
+</html>

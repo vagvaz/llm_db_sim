@@ -12,6 +12,7 @@ function el(id){
     id, value:defaults[id]||'8', textContent:'', innerHTML:'', disabled:false, style:{},
     classList:{ toggle(){}, add(){}, remove(){}, contains(){return false;} },
     addEventListener(){}, setAttribute(){},
+    querySelectorAll(){ return []; },
   };
 }
 const ids={};

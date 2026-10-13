@@ -308,10 +308,49 @@ function mcStats(arr){
   return {p50:q(.5),p90:q(.9),p95:q(.95),p99:q(.99),mean:m,sd:Math.sqrt(v2/n),sorted:s};
 }
 
+
+/* ---------- arrival occupancy distribution (arrival theorem) ---------- */
+function chainMarginals(N, tauT, stations){
+  const fs=[]; const hasThink=tauT>1e-9;
+  if(hasThink) fs.push(normExp(isfLog(tauT,N)));
+  stations.forEach(st=>fs.push(normExp(mmcfLog(st.c,st.tau,N))));
+  const svcIdx=stations.map((st,k)=> hasThink? k+1 : k);
+  const Kt=fs.length;
+  const unit=new Array(N+1).fill(0); unit[0]=1;
+  const pref=[unit]; for(let k=1;k<=Kt;k++) pref.push(convArr(pref[k-1],fs[k-1],N));
+  const suf=new Array(Kt+1); suf[Kt]=unit;
+  for(let k=Kt-1;k>=0;k--) suf[k]=convArr(fs[k],suf[k+1],N);
+  const GN=pref[Kt][N];
+  if(!(GN>0)) return null;
+  return stations.map((sd,k)=>{
+    const idx=svcIdx[k];
+    const rest=convArr(pref[idx],suf[idx+1],N);
+    const pmf=new Array(N+1).fill(0);
+    for(let n=0;n<=N;n++) pmf[n]=fs[idx][n]*rest[N-n]/GN;
+    return pmf;
+  });
+}
+function arrivalPMFs(P){
+  const stations=deriveStations(P);
+  const N=Math.max(1,Math.round(P.N));
+  const pmf = N>1 ? chainMarginals(N-1, Math.max(0,P.tauThink||0), stations) : null;
+  return {stations, pmf, seen: pmf? pmf.map(a=>{ let m=0; for(let n=0;n<a.length;n++) m+=n*a[n]; return m; }) : stations.map(()=>0)};
+}
+/* per-station sojourn (agent-facing latency): closed-form percentiles of tau + calibrated wait mixture */
+function sojournStats(st){
+  const mu=st.mix.mu, pi=st.mix.pi, tau=st.tau;
+  const q=p=>{
+    if(pi<=1e-12 || p<=1-pi) return tau;
+    return tau - Math.log((1-p)/pi)/mu;
+  };
+  const waitVar=pi*2/(mu*mu) - (pi/mu)*(pi/mu);
+  return {p50:q(.5), p90:q(.9), p95:q(.95), p99:q(.99), mean:st.R, sd:Math.sqrt(Math.max(0,waitVar))};
+}
+
 /*MATHCORE-END*/
 /* node export guard (browser ignores this) */
 if(typeof module!=='undefined' && module.exports){
   module.exports={mulberry32,gamma1,makeSampler,erlangB,erlangC,logfact,mmcfLog,isfLog,
-    normExp,convArr,deriveStations,solveChain,solveChain:solveChain,solve,latencyDistribution,mcSim,mcStats,erlangC};
+    normExp,convArr,deriveStations,solveChain,solve,latencyDistribution,mcSim,mcStats,chainMarginals,arrivalPMFs,sojournStats};
 }
 /*MATHCORE-END*/

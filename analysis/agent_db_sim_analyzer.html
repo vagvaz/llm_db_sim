@@ -147,44 +147,17 @@
       <div class="hintline">The non-work time between an agent finishing one loop and starting the next. Long think time spreads agents out, lowering pressure. N × (1/τ<sub>think</sub>) roughly bounds how much load the agents can generate.</div>
     </div>
 
-    <div class="card">
-      <h2>LLM endpoint (M/G/c)</h2>
-      <div class="field">
-        <label>τ<sub>LLM</sub> — mean service <span class="sub">per call (s)</span></label>
-        <input type="number" id="tauLLM" value="1.5" min="0.001" max="600" step="0.1">
+<div class="card">
+      <h2>Topology — station chain</h2>
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <button class="btn" id="preset2">LLM&nbsp;+&nbsp;DB</button>
+        <button class="btn" id="preset3">LLM&nbsp;+&nbsp;DB (compute&nbsp;+&nbsp;storage)</button>
+        <button class="btn" id="addSt">+&nbsp;station</button>
       </div>
-      <div class="hintline">How long one call occupies one inference server on average (prompt processing time).</div>
-      <div style="display:grid;grid-template-columns:1fr 96px;align-items:center">
-        <label style="font-size:13px">c<sub>LLM</sub> — servers</label>
-        <input type="number" id="cLLM" value="4" min="1" max="2000" step="1">
-      </div>
-      <div class="hintline">How many calls the endpoint can process simultaneously (parallel capacity of the inference cluster). An arriving call that finds all c servers busy waits in a queue.</div>
-      <input type="range" id="cLLM_s" min="1" max="64" step="1" value="4" style="margin-top:4px">
-      <div class="field" style="margin-top:8px">
-        <label>c²<sub>s,LLM</sub> — service SCV <span class="sub">1 = exponential · 0 = deterministic</span></label>
-        <input type="number" id="csLLM" value="1.0" min="0" max="10" step="0.1">
-      </div>
-      <div class="hintline">Jitter of the service time: SCV = variance/mean². 1 = fully random (exponential), 0 = always exactly τ (e.g. fixed token budget). More jitter → longer queues at the same average load.</div>
-    </div>
-
-    <div class="card">
-      <h2>DB endpoint (M/G/c)</h2>
-      <div class="field">
-        <label>τ<sub>DB</sub> — mean service <span class="sub">per query (s)</span></label>
-        <input type="number" id="tauDB" value="0.3" min="0.001" max="600" step="0.05">
-      </div>
-      <div class="hintline">How long one query occupies one DB server (compute+storage+network compressed into one number).</div>
-      <div style="display:grid;grid-template-columns:1fr 96px;align-items:center">
-        <label style="font-size:13px">c<sub>DB</sub> — servers</label>
-        <input type="number" id="cDB" value="8" min="1" max="2000" step="1">
-      </div>
-      <div class="hintline">How many queries the DB endpoint handles at once.</div>
-      <input type="range" id="cDB_s" min="1" max="128" step="1" value="8" style="margin-top:4px">
-      <div class="field" style="margin-top:8px">
-        <label>c²<sub>s,DB</sub> — service SCV</label>
-        <input type="number" id="csDB" value="1.0" min="0" max="10" step="0.1">
-      </div>
-      <div class="hintline">Jitter of the query service time (data-dependent queries typically have SCV well above 1).</div>
+      <div id="stRows"></div>
+      <div class="hintline">Agents visit <b>every listed station once per cycle, in order</b> — each row is an M/G/c endpoint
+      (parallel servers, service jitter). Model multiple compute and storage nodes by chaining them
+      (preset&nbsp;2), or extra inference stages by adding a second LLM-class station. Rescan: the first row is entered first.</div>
     </div>
 
     <div class="card">
@@ -235,8 +208,8 @@
       <div class="tile" id="tile_p99"><div class="k">p99 latency</div><div class="v" id="t_p99">–</div><span class="a" id="a_p99"></span></div>
       <div class="tile" id="tile_mean"><div class="k">mean ± sd</div><div class="v" id="t_mean">–</div><span class="a" id="a_mean"></span></div>
       <div class="tile" id="tile_x"><div class="k">throughput X</div><div class="v" id="t_x">–</div><span class="a" id="a_x"></span></div>
-      <div class="tile" id="tile_rho"><div class="k">ρ LLM / DB</div><div class="v" id="t_rho" style="font-size:16px">–</div><span class="a" id="a_rho"></span></div>
-      <div class="tile" id="tile_pwait"><div class="k">P(wait) LLM/DB</div><div class="v" id="t_pwait" style="font-size:16px">–</div><span class="a" id="a_pwait"></span></div>
+      <div class="tile" id="tile_rho"><div class="k">ρ (bottleneck)</div><div class="v" id="t_rho" style="font-size:16px">–</div><span class="a" id="a_rho"></span></div>
+      <div class="tile" id="tile_pwait"><div class="k">P(wait) @ bottleneck</div><div class="v" id="t_pwait" style="font-size:16px">–</div><span class="a" id="a_pwait"></span></div>
     </div>
 
     <div class="chartcard">
@@ -269,6 +242,16 @@
         <span id="legMc"><span class="sw" style="background:var(--mcc)"></span>Monte Carlo</span>
         <span><span class="sw" style="background:var(--warn)"></span>percentile markers</span>
       </div>
+    </div>
+
+    <div class="chartcard">
+      <h3 id="arrTitle">Arrival occupancy at the DB</h3>
+      <p class="note" id="arrNote">Exactly how many agents were already there when an agent arrives to add its query (arrival theorem, N−1 chain).</p>
+      <div id="chartArr"></div>
+      <div class="read"><b>How to read:</b> each bar is the exact probability that an arriving query joins <b>n</b> other
+      agents already at this endpoint — the DES traces would measure the same empirical histogram.
+      Mass sitting at 0 = arriving to an empty endpoint (no queue to join); the tail beyond the server
+      count is the fraction of arrivals that must wait. Heading over the bars shows the mean seen.</div>
     </div>
 
     <div class="chartcard">
@@ -633,45 +616,92 @@ function mcStats(arr){
 }
 
 
+/* ---------- arrival occupancy distribution (arrival theorem) ---------- */
+function chainMarginals(N, tauT, stations){
+  const fs=[]; const hasThink=tauT>1e-9;
+  if(hasThink) fs.push(normExp(isfLog(tauT,N)));
+  stations.forEach(st=>fs.push(normExp(mmcfLog(st.c,st.tau,N))));
+  const svcIdx=stations.map((st,k)=> hasThink? k+1 : k);
+  const Kt=fs.length;
+  const unit=new Array(N+1).fill(0); unit[0]=1;
+  const pref=[unit]; for(let k=1;k<=Kt;k++) pref.push(convArr(pref[k-1],fs[k-1],N));
+  const suf=new Array(Kt+1); suf[Kt]=unit;
+  for(let k=Kt-1;k>=0;k--) suf[k]=convArr(fs[k],suf[k+1],N);
+  const GN=pref[Kt][N];
+  if(!(GN>0)) return null;
+  return stations.map((sd,k)=>{
+    const idx=svcIdx[k];
+    const rest=convArr(pref[idx],suf[idx+1],N);
+    const pmf=new Array(N+1).fill(0);
+    for(let n=0;n<=N;n++) pmf[n]=fs[idx][n]*rest[N-n]/GN;
+    return pmf;
+  });
+}
+function arrivalPMFs(P){
+  const stations=deriveStations(P);
+  const N=Math.max(1,Math.round(P.N));
+  const pmf = N>1 ? chainMarginals(N-1, Math.max(0,P.tauThink||0), stations) : null;
+  return {stations, pmf, seen: pmf? pmf.map(a=>{ let m=0; for(let n=0;n<a.length;n++) m+=n*a[n]; return m; }) : stations.map(()=>0)};
+}
+/* per-station sojourn (agent-facing latency): closed-form percentiles of tau + calibrated wait mixture */
+function sojournStats(st){
+  const mu=st.mix.mu, pi=st.mix.pi, tau=st.tau;
+  const q=p=>{
+    if(pi<=1e-12 || p<=1-pi) return tau;
+    return tau - Math.log((1-p)/pi)/mu;
+  };
+  const waitVar=pi*2/(mu*mu) - (pi/mu)*(pi/mu);
+  return {p50:q(.5), p90:q(.9), p95:q(.95), p99:q(.99), mean:st.R, sd:Math.sqrt(Math.max(0,waitVar))};
+}
+
+
 /* node export guard (browser ignores this) */
 if(typeof module!=='undefined' && module.exports){
   module.exports={mulberry32,gamma1,makeSampler,erlangB,erlangC,logfact,mmcfLog,isfLog,
-    normExp,convArr,deriveStations,solveChain,solveChain:solveChain,solve,latencyDistribution,mcSim,mcStats,erlangC};
+    normExp,convArr,deriveStations,solveChain,solve,latencyDistribution,mcSim,mcStats,chainMarginals,arrivalPMFs,sojournStats};
 }
 
 
 /*MATHCORE-END*/
 </script>
 <script>
-/* Analyzer UI: reads params, drives the math core, renders tiles/charts/tables. */
+/* Analyzer UI: station-chain state model; renders tiles/charts/tables.
+   The station list (multiple compute/storage/inference endpoints) lives in
+   STATIONS — the DOM editor writes into it; the read path uses the state. */
 'use strict';
 const $=id=>document.getElementById(id);
-let MODE='A';                 // 'A' analytic | 'M' monte carlo | 'C' compare
-let A=null;                   // {P,num,sol,dist}
-let MC=null;                  // {P,mcSeed,mcN,mcWarm,res,stats,empWL,empWD}
+let MODE='A';                  // 'A' analytic | 'M' monte carlo | 'C' compare
+let STATIONS=[
+  {name:'LLM', tau:1.5, c:4, scv:1},
+  {name:'DB',  tau:0.3, c:8, scv:1}
+];
+const PRESETS={
+  preset2:[{name:'LLM',tau:1.5,c:4,scv:1},{name:'DB',tau:0.3,c:8,scv:1}],
+  preset3:[{name:'LLM',tau:1.5,c:4,scv:1},{name:'DB compute',tau:0.18,c:4,scv:1},{name:'DB storage',tau:0.12,c:4,scv:1}]
+};
+let A=null, MC=null;           // analytic cache {P,num,sol,dist,arr,bn} / MC cache
 const f2=v=> isFinite(v)? v.toFixed(2) : '∞';
 const f3=v=> isFinite(v)? v.toFixed(3) : '∞';
 
 function readParams(){
+  const stations=STATIONS.map(s=>({
+    name:String(s.name||'st'), tau:Math.max(1e-3,+s.tau||1e-3),
+    c:Math.max(1,Math.round(+s.c||1)), scv:Math.max(0,+s.scv||0)
+  }));
   const P={
     N:        Math.max(1, Math.round(+$('N').value||1)),
     tauThink: Math.max(0, +$('tauThink').value||0),
-    tauLLM:   Math.max(1e-3, +$('tauLLM').value||1e-3),
-    cLLM:     Math.max(1, Math.round(+$('cLLM').value||1)),
-    csLLM:    Math.max(0,  +$('csLLM').value||0),
-    tauDB:    Math.max(1e-3, +$('tauDB').value||1e-3),
-    cDB:      Math.max(1, Math.round(+$('cDB').value||1)),
-    csDB:     Math.max(0,  +$('csDB').value||0)
+    stations
   };
   const num={
-    gridN:   Math.max(256,  Math.min(8192, Math.round(+$('gridN').value||2048))),
-    horizon: Math.max(4,    Math.min(40,   Math.round(+$('horizon').value||12))),
-    sweepMax:Math.max(10,   Math.min(300,  Math.round(+$('sweepMax').value||120)))
+    gridN:   Math.max(256, Math.min(8192, Math.round(+$('gridN').value||2048))),
+    horizon: Math.max(4,   Math.min(40,   Math.round(+$('horizon').value||12))),
+    sweepMax:Math.max(10,  Math.min(300,  Math.round(+$('sweepMax').value||120)))
   };
   const mcSet={
-    mcN:    Math.max(500,    Math.min(200000, Math.round(+$('mcN').value||20000))),
-    mcWarm: Math.max(0,      Math.min(0.5,    +$('mcWarm').value||0)),
-    mcSeed: Math.max(0,      Math.round(+$('mcSeed').value||0))
+    mcN:    Math.max(500, Math.min(200000, Math.round(+$('mcN').value||20000))),
+    mcWarm: Math.max(0,   Math.min(0.5,    +$('mcWarm').value||0)),
+    mcSeed: Math.max(0,   Math.round(+$('mcSeed').value||0))
   };
   return {P,num,mcSet};
 }
@@ -687,30 +717,27 @@ function banner(cls,text){
 function computeAnalytic(){
   const {P,num}=readParams();
   const sol=solve(P);
-  A={P,num,sol,dist:null};
+  A={P,num,sol,dist:null,arr:null,bn:null};
   if(!sol.ok){
     banner('bad','Solver failed — check parameters.');
-    setTiles(); drawLat(); drawTable(); drawSweep(); return;
+    setTiles(); drawLat(); drawTable(); drawSweep(); drawArr(); return;
   }
   A.dist=latencyDistribution(P,sol,num.gridN,num.horizon);
-  const rho=Math.max(sol.rhoL,sol.rhoD);
-  if(rho>=0.995){
-    banner('bad','Near saturation: ρ='+rho.toFixed(3)+' — latencies grow steeply with N.');
-  } else if(rho>=0.9){
-    banner('warn','Approaching saturation: ρ='+rho.toFixed(3)+' (knee nearby).');
-  } else if(A.dist.M<0.985){
-    banner('warn','Grid captured '+(A.dist.M*100).toFixed(1)+'% of PDF mass — raise the horizon.');
+  try{ A.arr=arrivalPMFs(P); }catch(e){ A.arr=null; }
+  const bn=sol.st.reduce((b,s)=>(b===null||s.rho>b.rho)?s:b,null);
+  A.bn=bn;
+  const share=bn? bn.Wq/sol.T : 0;
+  if(bn.rho>=0.995){
+    banner('bad','Near saturation: bottleneck '+bn.name+' ρ='+bn.rho.toFixed(3)+' — latencies grow steeply with N.');
+  } else if(bn.rho>=0.9){
+    banner('warn','Bottleneck: '+bn.name+' (ρ='+bn.rho.toFixed(3)+', '+(share*100).toFixed(1)+'% of cycle time is queueing there). Approaching saturation — knee nearby.');
   } else {
-    banner('ok','Exact closed-chain solve (product form; cross-checked vs a brute-force CTMC).');
+    banner('ok','Exact closed-chain solve · bottleneck: '+bn.name+' (ρ='+bn.rho.toFixed(2)+', queueing = '+(share*100).toFixed(1)+'% of the loop).');
   }
-  setTiles(); drawLat(); drawTable(); drawSweep();
+  setTiles(); drawLat(); drawTable(); drawSweep(); drawArr();
 }
 
 /* ---------------- monte carlo ---------------- */
-function mcState(){
-  const mcSet=readParams().mcSet;
-  return mcSet;
-}
 function mcStale(){
   if(!MC) return true;
   const {P,mcSet}=readParams();
@@ -722,85 +749,80 @@ function runMC(){
   const btn=$('recompute');
   btn.textContent='Running Monte Carlo…'; btn.disabled=true;
   setTimeout(()=>{
-    const seed = mcSet.mcSeed===0 ? (Date.now()>>>0) : mcSet.mcSeed;
+    const seed=mcSet.mcSeed===0?(Date.now()>>>0):mcSet.mcSeed;
     const res=mcSim(P, mcSet.mcN, mcSet.mcWarm, seed);
     if(res&&res.ok&&res.kept>1){
       const stats=mcStats(res.lat);
-      let eh=0,ed=0;
-      for(const w of res.wl) if(w>0) eh++;
-      for(const w of res.wd) if(w>0) ed++;
+      /* per-station empirical wait means + P(wait) */
+      const mw=fill(res.wq.map(w=>{let s=0;for(const v of w)s+=v;return s/res.kept;}));
+      const pw=fill(res.wq.map(w=>{let c=0;for(const v of w)if(v>0)c++;return c/res.kept;}));
       MC={P, mcN:mcSet.mcN, mcWarm:mcSet.mcWarm, mcSeed:mcSet.mcSeed,
-          res, stats, empWL:eh/res.kept, empWD:ed/res.kept, seedUsed:seed};
+          res, stats, mw, pw, seedUsed:seed};
     } else {
       MC=null; banner('bad','Monte Carlo failed — reduce cycles or check parameters.');
     }
     btn.textContent='Recompute (incl. Monte Carlo)'; btn.disabled=false;
-    setTiles(); drawLat(); drawTable();
+    setTiles(); drawLat(); drawTable(); drawArr();
   },20);
 }
+function fill(a){ return a.map(v=>isFinite(v)?v:0); }
 
 /* ---------------- tiles ---------------- */
-function setMC(idMain,mcVal,anaVal,unit){
-  setMC.$(idMain).textContent=mcVal;
-  setMC.$('a_'+idMain.slice(2)).textContent=anaVal;
-}
-function setMCBind(){ setMC.$=$; }
-
 function setTiles(){
   const S=A&&A.sol, D=A&&A.dist;
-  const mcOn=(MODE!=='A')&&(!!MC);
-  const R=mcOn? MC.res:null, ST=mcOn? MC.stats:null;
-  const put=id=>obj=>{
-    $( id ).textContent=obj.v;
-    $('a_'+id.slice(2)).textContent=obj.a||'';
-  };
+  const mcOn=(MODE!=='A')&&MC;
+  const R=mcOn?MC.res:null, ST=mcOn?MC.stats:null;
+  const bn=A&&A.bn;
+  function put(id,v,a){
+    const o=(v!==null && typeof v==='object')?v:{v,a};
+    $(id).textContent=o.v;
+    const e=$('a_'+id.slice(2)); if(e) e.textContent=o.a||'';
+  }
   document.querySelectorAll('.tile').forEach(t=>t.classList.toggle('mcmode',MODE==='M'));
-  if(!S){ put('t_p50')({v:'—'}); put('t_p90')({v:'—'}); put('t_p95')({v:'—'});
-          put('t_p99')({v:'—'}); put('t_mean')({v:'—'}); put('t_x')({v:'—'});
-          put('t_rho')({v:'—'}); put('t_pwait')({v:'—'});
-          return; }
+  if(!S){
+    ['t_p50','t_p90','t_p95','t_p99','t_mean','t_x','t_rho','t_pwait'].forEach(id=>put(id,{v:'—'}));
+    return;
+  }
+  const bnTxt=(r,n)=> f3(r)+' ('+n+')';
   if(MODE==='M'){
     if(!MC){
-      put('t_p50')({v:'—',a:'press Recompute to run MC'});
-      put('t_p90')({v:'—'}); put('t_p95')({v:'—'}); put('t_p99')({v:'—'});
-      put('t_mean')({v:'—'}); put('t_x')({v:'—'}); put('t_rho')({v:'—'}); put('t_pwait')({v:'—'});
+      put('t_p50',{v:'—',a:'press Recompute to run MC'});
+      ['t_p90','t_p95','t_p99','t_mean','t_x','t_rho','t_pwait'].forEach(id=>put(id,{v:'—'}));
       return;
     }
-    put('t_p50')({v:f2(ST.p50)+' s', a:'analytic '+(D?f2(D.p50)+' s':'—')});
-    put('t_p90')({v:f2(ST.p90)+' s', a:'analytic '+(D?f2(D.p90)+' s':'—')});
-    put('t_p95')({v:f2(ST.p95)+' s', a:'analytic '+(D?f2(D.p95)+' s':'—')});
-    put('t_p99')({v:f2(ST.p99)+' s', a:'analytic '+(D?f2(D.p99)+' s':'—')});
-    put('t_mean')({v:f2(ST.mean)+'±'+f2(ST.sd), a:'analytic '+(D?f2(D.mean)+'±'+f2(D.sd):'—')});
-    put('t_x')({v:f3(R.X)+' /s', a:'analytic '+f3(S.X)+' /s'});
-    put('t_rho')({v:R.rhoL.toFixed(2)+' / '+R.rhoD.toFixed(2),
-                  a:'analytic '+S.rhoL.toFixed(2)+' / '+S.rhoD.toFixed(2)});
-    put('t_pwait')({v:(MC.empWL*100).toFixed(0)+'% / '+(MC.empWD*100).toFixed(0)+'%',
-                    a:'analytic '+(S.wL.pi*100).toFixed(0)+'% / '+(S.wD.pi*100).toFixed(0)+'%'});
+    const bi=bn?S.st.indexOf(bn):0;
+    put('t_p50',{v:f2(ST.p50)+' s', a:'analytic '+(D?f2(D.p50)+' s':'—')});
+    put('t_p90',{v:f2(ST.p90)+' s', a:'analytic '+(D?f2(D.p90)+' s':'—')});
+    put('t_p95',{v:f2(ST.p95)+' s', a:'analytic '+(D?f2(D.p95)+' s':'—')});
+    put('t_p99',{v:f2(ST.p99)+' s', a:'analytic '+(D?f2(D.p99)+' s':'—')});
+    put('t_mean',{v:f2(ST.mean)+'±'+f2(ST.sd), a:'analytic '+(D?f2(D.mean)+'±'+f2(D.sd):'—')});
+    put('t_x',{v:f3(R.X)+' /s', a:'analytic '+f3(S.X)+' /s'});
+    put('t_rho',{v:bnTxt(R.rho[bi], S.st[bi].name), a:'analytic '+(bn?bnTxt(bn.rho,bn.name):'—')});
+    put('t_pwait',{v:(MC.pw[bi]*100).toFixed(0)+'%', a:'analytic '+(bn?(bn.mix.pi*100).toFixed(0)+'%':'—')});
     $('latNote').textContent='Monte Carlo (seed '+MC.seedUsed+', n='+MC.res.kept+' kept cycles): empirical PDF/CDF; error O(1/√n).';
   } else {
-    put('t_p50')({v:f2(D.p50)+' s', a:mcOn?'MC '+f2(ST.p50)+' s':''});
-    put('t_p90')({v:f2(D.p90)+' s', a:mcOn?'MC '+f2(ST.p90)+' s':''});
-    put('t_p95')({v:f2(D.p95)+' s', a:mcOn?'MC '+f2(ST.p95)+' s':''});
-    put('t_p99')({v:f2(D.p99)+' s', a:mcOn?'MC '+f2(ST.p99)+' s':''});
-    put('t_mean')({v:f2(D.mean)+'±'+f2(D.sd), a:mcOn?('MC '+f2(ST.mean)+'±'+f2(ST.sd)):''});
-    put('t_x')({v:f3(S.X)+' /s', a:mcOn?('MC '+f3(R.X)+' /s'):''});
-    put('t_rho')({v:S.rhoL.toFixed(2)+' / '+S.rhoD.toFixed(2), a:mcOn?('MC '+R.rhoL.toFixed(2)+' / '+R.rhoD.toFixed(2)):''});
-    put('t_pwait')({v:(S.wL.pi*100).toFixed(0)+'% / '+(S.wD.pi*100).toFixed(0)+'%',
-                    a:mcOn?('MC '+(MC.empWL*100).toFixed(0)+'% / '+(MC.empWD*100).toFixed(0)+'%'):''});
+    put('t_p50',{v:f2(D.p50)+' s', a:mcOn?'MC '+f2(ST.p50)+' s':''});
+    put('t_p90',{v:f2(D.p90)+' s', a:mcOn?'MC '+f2(ST.p90)+' s':''});
+    put('t_p95',{v:f2(D.p95)+' s', a:mcOn?'MC '+f2(ST.p95)+' s':''});
+    put('t_p99',{v:f2(D.p99)+' s', a:mcOn?'MC '+f2(ST.p99)+' s':''});
+    put('t_mean',{v:f2(D.mean)+'±'+f2(D.sd), a:mcOn?('MC '+f2(ST.mean)+'±'+f2(ST.sd)):''});
+    put('t_x',{v:f3(S.X)+' /s', a:mcOn?('MC '+f3(R.X)+' /s'):''});
+    if(bn){
+      const bi=S.st.indexOf(bn);
+      put('t_rho',{v:bnTxt(bn.rho,bn.name), a:mcOn?('MC '+f3(R.rho[bi])):''});
+      put('t_pwait',{v:(bn.mix.pi*100).toFixed(0)+'%', a:mcOn?('MC '+(MC.pw[bi]*100).toFixed(0)+'%'):''});
+    }
     $('latNote').textContent='Analytic engine: closed-chain exact means + calibrated wait mixture (±10–15% vs MC).';
   }
 }
 
-/* ---------------- charts (SVG strings) ---------------- */
+/* ---------------- charts ---------------- */
 function svgBox(W,H){
   return {
     W,H,x0:54,x1:W-16,y0:14,y1:H-30,parts:[],
-    line(x1,y1,x2,y2,stroke,w,dash){this.parts.push('<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2
-      +'" stroke="'+stroke+'" stroke-width="'+(w||1)+'"'+(dash?' stroke-dasharray="'+dash+'"':'')+'/>');},
-    text(s,x,y,fill,size,anchor){this.parts.push('<text x="'+x+'" y="'+y+'" fill="'+fill
-      +'" font-size="'+(size||10.5)+'" font-family="ui-monospace,Menlo,monospace" text-anchor="'+(anchor||'middle')+'">'+s+'</text>');},
-    path(d,stroke,w,dash,fill){this.parts.push('<path d="'+d+'" fill="'+(fill||'none')
-      +'" stroke="'+(stroke||'none')+'" stroke-width="'+(w||1)+'"'+(dash?' stroke-dasharray="'+dash+'"':'')+'/>');},
+    line(x1,y1,x2,y2,stroke,w,dash){this.parts.push('<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+stroke+'" stroke-width="'+(w||1)+'"'+(dash?' stroke-dasharray="'+dash+'"':'')+'/>');},
+    text(s,x,y,fill,size,anchor){this.parts.push('<text x="'+x+'" y="'+y+'" fill="'+fill+'" font-size="'+(size||10.5)+'" font-family="ui-monospace,Menlo,monospace" text-anchor="'+(anchor||'middle')+'">'+s+'</text>');},
+    path(d,stroke,w,dash,fill){this.parts.push('<path d="'+d+'" fill="'+(fill||'none')+'" stroke="'+(stroke||'none')+'" stroke-width="'+(w||1)+'"'+(dash?' stroke-dasharray="'+dash+'"':'')+'/>');},
     circle(x,y,r,fill){this.parts.push('<circle cx="'+x+'" cy="'+y+'" r="'+r+'" fill="'+fill+'"/>');},
     out(){return '<svg viewBox="0 0 '+this.W+' '+this.H+'">'+this.parts.join('')+'</svg>';}
   };
@@ -824,10 +846,7 @@ function drawLat(){
   const S=A.sol, D=A.dist;
   const useMC=(MODE!=='A')&&MC;
   const mcP99=useMC?MC.stats.p99:0;
-  const tMax=Math.max(1e-3, Math.min(D.horizon, Math.max(
-    mcP99*1.08,
-    isFinite(D.p99)? D.p99*1.12 : 0,
-    D.mean*3)));
+  const tMax=Math.max(1e-3, Math.min(D.horizon, Math.max(mcP99*1.08, isFinite(D.p99)?D.p99*1.12:0, D.mean*3)));
   const c=svgBox(880,320);
   for(let i=0;i<=4;i++) c.line(c.x0,c.y0+i*(c.y1-c.y0)/4,c.x1,c.y0+i*(c.y1-c.y0)/4,'var(--grid)',1);
   for(let i=0;i<=4;i++) c.text((tMax*i/4).toFixed(1)+'s',px(c,tMax*i/4,tMax),c.H-12,'var(--muted)');
@@ -835,14 +854,12 @@ function drawLat(){
   if(!useMC||MODE==='C'){
     const dx=D.dx, n=D.gridN;
     let fmax=1e-30; for(let i=0;i<n;i++) if(D.f[i]>fmax) fmax=D.f[i];
-    let dC='', dP='', first=true, dpFirst=true;
+    let dC='',dP='',first=true,dpFirst=true;
     for(let i=0;i<n;i++){
       const t=i*dx; if(t>tMax) break;
       const X=px(c,t,tMax).toFixed(1);
-      const Yc=py(c,D.cdf[i]/D.M).toFixed(1);
-      const Yp=py(c,(D.f[i]/fmax)*0.55).toFixed(1);
-      dC+=(first?'M':' L')+X+','+Yc; first=false;
-      dP+=(dpFirst?'M':' L')+X+','+Yp; dpFirst=false;
+      dC+=(first?'M':' L')+X+','+py(c,D.cdf[i]/D.M).toFixed(1); first=false;
+      dP+=(dpFirst?'M':' L')+X+','+py(c,(D.f[i]/fmax)*0.55).toFixed(1); dpFirst=false;
     }
     c.path(dP+' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,0)+' L'+px(c,0,tMax).toFixed(1)+','+py(c,0)+' Z','none',0,null,'rgba(90,169,230,.25)');
     c.path(dC,'var(--accent)',2);
@@ -874,6 +891,34 @@ function drawLat(){
   box.innerHTML=c.out();
 }
 
+/* arrival occupancy distribution at the LAST station (the DB) — exact PMF */
+function drawArr(){
+  const box=$('chartArr'); box.innerHTML='';
+  if(!A||!A.sol) return;
+  const arr=A.arr, st=A.sol.st;
+  if(!arr||!arr.pmf||!arr.pmf.length){ $('arrTitle').textContent='Arrival occupancy'; return; }
+  const idxLast=st.length-1;
+  const name=st[idxLast].name;
+  $('arrTitle').textContent='Arrival occupancy at '+name;
+  $('arrNote').textContent='Exactly how many agents were already at '+name+' when an agent arrives (arrival theorem, N−1 chain) — mean '+arr.seen[idxLast].toFixed(2)+'.';
+  const pmf=arr.pmf[idxLast];
+  const c=svgBox(620,220);
+  const nShow=Math.min(pmf.length, 14);
+  let pmax=1e-30; for(let n=0;n<nShow;n++) pmax=Math.max(pmax,pmf[n]);
+  const bw=(c.x1-c.x0)/nShow;
+  c.line(c.x0,py(c,0),c.x1,py(c,0),'var(--border)',1);
+  for(let n=0;n<nShow;n++){
+    const h=(pmf[n]/pmax)*0.8;
+    const x=c.x0+n*bw;
+    c.path('M'+x.toFixed(1)+','+py(c,0).toFixed(1)+' L'+x.toFixed(1)+','+py(c,h).toFixed(1)+' L'+(x+bw*0.8).toFixed(1)+','+py(c,h).toFixed(1)+' L'+(x+bw*0.8).toFixed(1)+','+py(c,0).toFixed(1)+' Z','none',0,null, n>=st[idxLast].c ? 'rgba(229,180,90,.55)':'rgba(90,169,230,.55)');
+    if(nShow<=10 || n%2===0) c.text(''+n, x+bw*0.4, c.H-12, 'var(--muted)');
+  }
+  c.text('agents already present', c.x1-4, c.H-2, 'var(--muted)', 10, 'end');
+  c.text('P →', c.x0-8, c.y0+12, 'var(--muted)', 10, 'end');
+  c.text((pmax*100).toFixed(0)+'%', c.x0-8, c.y0+24, 'var(--muted)', 10, 'end');
+  box.innerHTML=c.out();
+}
+
 function drawSweep(){
   const box=$('chartSweep'); box.innerHTML='';
   if(!A||!A.sol) return;
@@ -881,7 +926,7 @@ function drawSweep(){
   for(let k=1;k<=Math.min(A.num.sweepMax,300);k++){
     const s=solve(Object.assign({},A.P,{N:k}));
     if(!s.ok) break;
-    pts.push({N:k,T:s.T,sat:Math.max(s.rhoL,s.rhoD)>=0.995});
+    pts.push({N:k,T:s.T,sat:s.st.some(x=>x.rho>=0.995)});
     if(!isFinite(s.T)||s.T>Math.max(80*A.sol.T,1e4)) break;
   }
   if(pts.length<3) return;
@@ -900,35 +945,66 @@ function drawSweep(){
   c.path(d,'var(--accent)',2);
   pts.filter(p=>p.sat).forEach(p=>c.line(px(c,p.N,Nmax),py(c,0),px(c,p.N,Nmax),py(c,1),'var(--bad)',2));
   if(knee){
-    const X=px(c,knee.N,Nmax), Y=py(c,knee.T,Tmax);
-    c.circle(X,Y,4.5,'var(--warn)');
-    c.text('knee N='+knee.N,X,Y-10,'var(--warn)',10);
+    c.circle(px(c,knee.N,Nmax),py(c,knee.T,Tmax),4.5,'var(--warn)');
+    c.text('knee N='+knee.N,px(c,knee.N,Nmax),py(c,knee.T,Tmax)-10,'var(--warn)',10);
   }
   for(let i=0;i<=4;i++){ const nv=Math.round(Nmax*i/4); c.text(''+nv,px(c,nv,Nmax),c.H-12,'var(--muted)'); }
   c.text('N agents',c.x1-2,c.H-2,'var(--muted)',10,'end');
   box.innerHTML=c.out();
 }
 
-/* ---------------- per-station table ---------------- */
+/* ---------------- per-station table (any K) ---------------- */
 function drawTable(){
   const S=A&&A.sol, h=$('tblh'), b=$('tblb');
   if(!S){ h.innerHTML=''; b.innerHTML=''; return; }
   const mcOn=(MODE!=='A')&&MC;
-  h.innerHTML='<tr><th>station</th><th>λ=X</th><th>ρ/server</th><th>P(wait&gt;0)</th><th>Wq</th><th>R=τ+Wq</th><th>Lq</th>'
-    +(mcOn?'<th>MC Wq</th><th>MC P(wait)</th>':'')+'</tr>';
-  function row(name,tau,pi,Wq,rho){
-    return '<tr><td>'+name+'</td><td>'+f3(S.X)+'</td><td>'+rho.toFixed(3)+'</td><td>'
-      +(pi*100).toFixed(0)+'%</td><td>'+f2(Wq)+' s</td><td>'+f2(tau+Wq)+' s</td><td>'+f3(S.X*Wq)+'</td>'
-      +(mcOn? '<td>'+f2(name==='LLM'?MC.mwl:MC.mwd)+' s</td><td>'+((name==='LLM'?MC.empWL:MC.empWD)*100).toFixed(0)+'%</td>':'')
-      +'</tr>';
+  h.innerHTML='<tr><th>station</th><th>λ=X</th><th>ρ/server</th><th>P(wait&gt;0)</th><th>Wq</th><th>delay share</th>'
+    +'<th>R=τ+Wq</th><th>soj p50</th><th>p95</th><th>p99</th>'+(mcOn?'<th>MC Wq</th>':'')+'</tr>';
+  function row(i){
+    const s=S.st[i], soj=sojournStats(s);
+    return '<tr><td>'+s.name+'</td><td>'+f3(S.X)+'</td><td>'+s.rho.toFixed(3)+'</td><td>'
+      +(s.mix.pi*100).toFixed(1)+'%</td><td>'+f2(s.Wq)+'s</td><td>'+(s.Wq/S.T*100).toFixed(1)+'%</td>'
+      +'<td>'+f2(s.R)+'s</td><td>'+f2(soj.p50)+'s</td><td>'+f2(soj.p95)+'s</td><td>'+f2(soj.p99)+'s</td>'
+      +(mcOn?'<td>'+f2(MC.mw[i])+'s</td>':'')+'</tr>';
   }
-  if(mcOn){
-    let sa=0,sb=0;
-    for(const w of MC.res.wl) sa+=w;
-    for(const w of MC.res.wd) sb+=w;
-    MC.mwl=sa/MC.res.kept; MC.mwd=sb/MC.res.kept;
-  }
-  b.innerHTML=row('LLM',A.P.tauLLM,S.wL.pi,S.WLq,S.rhoL)+row('DB',A.P.tauDB,S.wD.pi,S.WDq,S.rhoD);
+  b.innerHTML=S.st.map((s,i)=>row(i)).join('');
+}
+
+/* ---------------- station editor ---------------- */
+function renderStations(){
+  const box=$('stRows'); if(!box) return;
+  box.innerHTML=STATIONS.map((s,i)=>
+    '<div class="field" data-i="'+i+'" style="grid-template-columns:76px 1fr 62px 62px 62px 28px;margin-bottom:6px">'
+    +'<input type="text" data-k="name" data-i="'+i+'" value="'+String(s.name).replace(/"/g,'')+'" style="font-size:12px;padding:5px 6px">'
+    +'<label style="text-align:left;font-size:11.5px" class="hint">τ (s) · c · SCV</label>'
+    +'<input type="number" data-k="tau" data-i="'+i+'" value="'+s.tau+'" step="0.05" min="0.001">'
+    +'<input type="number" data-k="c" data-i="'+i+'" value="'+s.c+'" step="1" min="1">'
+    +'<input type="number" data-k="scv" data-i="'+i+'" value="'+s.scv+'" step="0.1" min="0">'
+    +'<button class="btn" data-del="'+i+'" title="remove station" style="padding:2px 7px">✕</button>'
+    +'</div>').join('');
+  box.querySelectorAll('input[type=text],input[type=number]').forEach(inp=>{
+    inp.addEventListener('input',()=>{
+      const i=+inp.getAttribute('data-i'), k=inp.getAttribute('data-k');
+      STATIONS[i][k]= (k==='name')? inp.value : inp.value;
+      schedule();
+    });
+  });
+  box.querySelectorAll('button[data-del]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      if(STATIONS.length<=1) return;
+      STATIONS.splice(+btn.getAttribute('data-del'),1);
+      renderStations(); schedule();
+    });
+  });
+}
+function setupEditor(){
+  $('preset2').addEventListener('click',()=>{ STATIONS=PRESETS.preset2.map(x=>Object.assign({},x)); renderStations(); schedule(); });
+  $('preset3').addEventListener('click',()=>{ STATIONS=PRESETS.preset3.map(x=>Object.assign({},x)); renderStations(); schedule(); });
+  $('addSt').addEventListener('click',()=>{
+    STATIONS.push({name:'st'+(STATIONS.length+1),tau:0.5,c:2,scv:1});
+    renderStations(); schedule();
+  });
+  renderStations();
 }
 
 /* ---------------- orchestration ---------------- */
@@ -949,23 +1025,15 @@ function setTab(m){
   ['tabA','tabM','tabC'].forEach((x,i)=>$(x).classList.toggle('on',['A','M','C'][i]===m));
   computeAnalytic();
   if(m!=='A'&&(mcStale()||!MC)) runMC();
-  else{ setTiles(); drawLat(); drawTable(); }
+  else{ setTiles(); drawLat(); drawTable(); drawArr(); }
 }
 function init(){
-  $('tabA').addEventListener('click',()=>setTab('A'));
-  $('tabM').addEventListener('click',()=>setTab('M'));
-  $('tabC').addEventListener('click',()=>setTab('C'));
+  ['tabA','tabM','tabC'].forEach((x,i)=>$(x).addEventListener('click',()=>setTab(['A','M','C'][i])));
   document.querySelectorAll('input[type=number],input[type=range]').forEach(inp=>{
-    inp.addEventListener('input',()=>{
-      const id=inp.id;
-      if(id&&id.endsWith('_s')){
-        const tgt=$(''+id.slice(0,-2));
-        if(tgt) tgt.value=inp.value;
-      }
-      schedule();
-    });
+    inp.addEventListener('input',schedule);
   });
   $('recompute').addEventListener('click',computeAll);
+  setupEditor();
   computeAnalytic();
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init);

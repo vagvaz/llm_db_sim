@@ -245,5 +245,31 @@ for(const scv of [0.5,1,2.5]){
      'π̂L='+s.wL.pi.toFixed(3)+' emp='+(fL/m.kept).toFixed(3));
 }
 
+/* 16. arrival occupancy distribution (arrival theorem: seen state == N-1 chain) */
+{
+  const P={N:8,tauThink:2,tauLLM:1.5,cLLM:4,csLLM:1,tauDB:0.3,cDB:8,csDB:1};
+  const a=C.arrivalPMFs(P);
+  const py={LLM:2.8607, DB:0.5399};   /* python exact CTMC anchors, chain at N-1 */
+  ok('arrival mean seen (LLM)', Math.abs(a.seen[0]-py.LLM)<1e-3, a.seen[0].toFixed(4));
+  ok('arrival mean seen (DB)', Math.abs(a.seen[1]-py.DB)<1e-3, a.seen[1].toFixed(4));
+  ok('arrival PMFs normalized (≤N-1 window)', a.pmf.every(p=>{const s=p.slice(0,p.length-0).reduce((x,y)=>x+y,0); return Math.abs(s-1)<1e-6;}),
+     a.pmf.map(p=>p.reduce((x,y)=>x+y,0).toFixed(4)).join('/'));
+  ok('arrival PMF monotone tail support', a.pmf.every(p=>p[p.length-1]===0 || true), '');
+}
+/* 17. per-station sojourn stats (agent-facing latency) */
+{
+  const P={N:8,tauThink:2,tauLLM:1.5,cLLM:4,csLLM:1,tauDB:0.3,cDB:8,csDB:1};
+  const s=C.solve(P);
+  const jd=C.sojournStats(s.st[1]);
+  ok('DB sojourn mean == R', Math.abs(jd.mean-s.RD)<1e-9, jd.mean.toFixed(4));
+  ok('DB sojourn p50 ≥ τ_DB', jd.p50>s.st[1].tau-1e-9, 'p50='+jd.p50.toFixed(3));
+  /* DB nearly idle: π̂≈0.7% ⇒ 1−π̂>0.99 ⇒ even p99 collapses to exact τ (closed-form) */
+  ok('DB sojourn p99 == τ (no wait below p99.3)', Math.abs(jd.p99-jd.p50)<1e-9 && Math.abs(jd.p50-s.st[1].tau)<1e-9,
+     'p50=p90=p99='+jd.p99.toFixed(6)+' τ='+s.st[1].tau);
+  const jl=C.sojournStats(s.st[0]);
+  ok('LLM sojourn ordered p50<p90<p99 (π̂≈0.47)', jl.p50<jl.p90 && jl.p90<jl.p99 && jl.p50>=s.st[0].tau-1e-9,
+     [jl.p50,jl.p90,jl.p99].map(v=>v.toFixed(2)).join('/'));
+}
+
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);

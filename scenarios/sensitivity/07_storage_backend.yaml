@@ -1,0 +1,85 @@
+# 07_storage_backend.yaml — sensitivity sweep 7: SSD generation vs topology.
+#
+# Grounded base: experiments/scenarios/profiles/grounded_agent_70b.yaml.
+# Storage axis crossed ONLY with one wired-vs-colocated axis (the designed
+# 2-way interaction; topology/compute factors stay out so the backend
+# delta isn't confounded with scale-out):
+#
+#   db.storage.backend in {ssd_gen3, ssd_gen4, ssd_enterprise}   (research:
+#     ssd-generations.md §5 YAML-ready presets: 3.4 / 6.8 / 14.0 GB/s
+#     sustained bandwidth, 550k / 800k / 2.4M IOPS, 80/40/80 us base)
+#   x db.topology in {centralized, disaggregated}
+#
+# Sub-question (c): does the storage generation ever bind under the
+# grounded agent query mix (volumes 0.0001-4 GB, complexity 0.005-20 CSE)?
+# 6 runs, sim.until 600 (shared constant, see 03). runs/sensitivity/sens-storage-backend/.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 16
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 32
+  input_tokens_per_s: 8000
+  output_tokens_per_s: 2000
+  ingress: fifo
+
+db:
+  topology: centralized         # swept: centralized | disaggregated
+  compute_nodes: 4
+  storage_nodes: 2
+  coordinators: 2
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise     # swept: ssd_gen3 | ssd_gen4 | ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: sens-storage-backend
+  factors:
+    db.storage.backend: [ssd_gen3, ssd_gen4, ssd_enterprise]
+    db.topology: [centralized, disaggregated]

@@ -1,0 +1,83 @@
+# 03_topology.yaml — sensitivity sweep 3: the three DB topologies.
+#
+# Same grounded base as 01_agents_x_inference.yaml (see its header).
+# One run per topology at the fixed N=4 scale (M=2 on disaggregated,
+# coordinators=2 on distributed), everything else grounded-fixed.
+# sim.until 600 matches files 01/02 (file 01 covers the load axis, files
+# 04-08 reuse this constant) so cross-file baselines stay comparable.
+#
+# Expectation from the grounded token sizes: the LLM token cap binds
+# first at 16 agents, so topology deltas on e2e are muted — the signal
+# lives in the per-stage latencies (storage_service, net_* hops) and in
+# utilization; sweep file 08 then re-asks the question at 64 agents.
+#
+# runs/sensitivity/sens-topology/ — 3 runs.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 16
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 32
+  input_tokens_per_s: 8000
+  output_tokens_per_s: 2000
+  ingress: fifo
+
+db:
+  topology: centralized        # swept: centralized | disaggregated | distributed
+  compute_nodes: 4             # N (no-op on centralized)
+  storage_nodes: 2             # M (disaggregated only)
+  coordinators: 2              # distributed only (must be < compute_nodes)
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: sens-topology
+  factors:
+    db.topology: [centralized, disaggregated, distributed]

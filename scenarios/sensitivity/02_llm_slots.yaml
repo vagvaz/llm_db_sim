@@ -1,0 +1,82 @@
+# 02_llm_slots.yaml — sensitivity sweep 2: the second inference-capacity knob.
+#
+# Same grounded base as 01_agents_x_inference.yaml (see its header). The
+# slot axis alone keeps the aggregate token rate in place: slots 8 < 16
+# agents develops real slot-queueing (llm.* queue > 0) even while every
+# served request still runs at the same token rates — this separates the
+# two ways the inference endpoint can bind (admission vs token-rate).
+#
+# Design: slots [8, 32] x agents [4, 16, 64] = 6 runs; output
+# tokens_per_s fixed at the grounded midpoint 2000 (crossed with the
+# token-rate axis in file 01 instead). sim.until 600.
+#
+# runs/sensitivity/sens-llm-slots/ — 6 runs.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 16
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 32                     # swept: 8 | 32
+  input_tokens_per_s: 8000
+  output_tokens_per_s: 2000
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 4
+  storage_nodes: 4
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: sens-llm-slots
+  factors:
+    agents.count: [4, 16, 64]
+    llm.slots: [8, 32]

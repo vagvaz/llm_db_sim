@@ -1,0 +1,95 @@
+# 01_agents_x_inference.yaml — sensitivity sweep 1: THE inference-vs-db axis.
+#
+# Grounded base (everything from scenarios/profiles/grounded_agent_70b.yaml):
+#   - 70B-midpoint LLM endpoint (research: llm-inference-serving.md §4):
+#     input 8000 tok/s + output 2000 tok/s aggregate caps, 32 slots
+#   - agents send grounded lognormal tokens (median-in ~60k, mean-out ~2.5k
+#     per call) with the TPC-derived mixed_agent query mix
+#     (research: tpc-workloads.md, mixed_agent_retrieval_analytics)
+#   - centralized DB, ssd_enterprise storage, 4 compute slots
+#     (research: ssd-generations.md §4 — the "honest" enterprise preset)
+#
+# Design: the load axis (agents.count) crossed ONLY with the single
+# inference-capacity axis (llm.output_tokens_per_s at fixed 32 slots) —
+# 9 designed runs, not a bigger factor cross. This answers sub-question
+# (a) of the sensitivity study: at which agent count, and at which
+# inference capacity, does the DB side start to bind (winner flips from
+# LLM-stretched service to db queueing)?
+#
+# Fixed: llm.input_tokens_per_s 8000 (total token cap = in + out rates:
+# 8500 / 10000 / 16000 tok/s), llm.slots 32, db untouched.
+# sim.until 600 to get usable completion counts even at 4 agents
+# (aggregate token goodput pins at the cap: ~13-190 completions/run).
+#
+# runs/sensitivity/sens-agents-inference/ — 9 runs.
+#   agent-db-sim sweep scenarios/sensitivity/01_agents_x_inference.yaml \
+#     --out runs/sensitivity --jobs 8
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 16
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 32
+  input_tokens_per_s: 8000
+  output_tokens_per_s: 2000     # swept: 500 | 2000 | 8000 (total cap 8500/10k/16k)
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 4              # no-op on centralized
+  storage_nodes: 4
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: sens-agents-inference
+  factors:
+    agents.count: [4, 16, 64]
+    llm.output_tokens_per_s: [500, 2000, 8000]

@@ -1,0 +1,84 @@
+# 04_disagg_scaleout.yaml — sensitivity sweep 4: disaggregated scale-out.
+#
+# Same grounded base as 01_agents_x_inference.yaml (see its header).
+# Scale-out on BOTH disaggregated axes, one-at-a-time around the file 03
+# midpoint (N=4, M=2): N in {1, 2, 4} at M=2, and M in {1} point at N=4
+# via the crossed (N=4, M=1) cell rather than a separate factor — no
+# blind 3x3 (the (1,1) corner and the N=1 row are degenerate: one shared
+# segment anyway). Design = 6 runs:
+#
+#   (N,M) cells covered: (1,2) (2,2) (4,2) (4,1) plus the two "diagonal"
+#   cells (2,1) and (1,1) only as a striping-collapse contrast — see the
+#   factors below: db.compute_nodes [1,2,4] x db.storage_nodes [1,2].
+#   (The N axis at M=1 is the compute-side frontier; keep for reference.)
+#
+# sim.until 600 (shared constant, see 03). runs/sensitivity/sens-disagg-scaleout/ — 6 runs.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 16
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 32
+  input_tokens_per_s: 8000
+  output_tokens_per_s: 2000
+  ingress: fifo
+
+db:
+  topology: disaggregated
+  compute_nodes: 4             # swept: 1 | 2 | 4 (compute slots scale with N)
+  storage_nodes: 2             # swept: 1 | 2 (striped backend budgets)
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: sens-disagg-scaleout
+  factors:
+    db.compute_nodes: [1, 2, 4]
+    db.storage_nodes: [1, 2]

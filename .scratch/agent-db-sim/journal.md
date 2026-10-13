@@ -39,3 +39,7 @@ Chronological log of orchestration decisions and stage completions. Tickets hold
 **12 task (resolved).** Viz stack: viz/{vcd,server,report,fixture}.py; vendored d3-wave/plotly static assets (offline-first); SSE init/delta/keepalive/done with safe-tail; serve/render CLI; fixture factory for standalone tests. 23 tests; suite 124 green. fix-6. Committed `3061e3b`.
 
 **Stage 3 dispatched (integration + acceptance).** Ticket 13 → fix-5 (reused, owns build_model): full agent/LLM/DB wiring, run dir pipeline (metrics.db + run.vcd + report), topology sweep acceptance demo.
+
+**13 task (resolved).** Integration: assembly.py glue (wire_agent_llm_db, QueryAdapter bridge for req/query port kinds), build_model complete; pipeline.py execute_run/enumerate_sweep; `run`/`sweep` produce config+metrics.db+run.vcd+report.html+summary.json; fp-tolerant container hoisted to simkit; topology_compare.yaml acceptance. 12-run sweep: centralized entry-compute 66.8%→83.4% queue share; disaggregated scale-out N=4→8 relieves p95 1.803→1.512; distributed coordinator winner as peers scale (45→61% @16 agents); llm_tight moves LLM to 17.5% share. Known gap: sat_score=0 (name mismatch vs probe tags). Suite 133 green. fix-5. Committed `21aca24`. Orchestrator independently verified artifacts + numbers.
+
+**Stage 4 dispatched (polish + docs).** Parallel: fix-8 (sat_score lookup fix + sweep.py F821 lint flag) and new fixer (USER_GUIDE.md + README, commands verified live).

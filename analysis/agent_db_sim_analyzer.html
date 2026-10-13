@@ -618,7 +618,7 @@ function mcSim(P, nKeep, warmFrac, seed){
   const out={ok:true, lat:latA, wq:wqA, kept, X:(kept-1)/K0, rho, K, stations};
   /* means per station from kept samples */
   out.wqMean=wqA.map(w=>{ let s=0; for(const v of w) s+=v; return s/kept; });
-  if(K===2){ out.wl=out.wq[0]; out.wd=out.wq[1]; }
+  if(K===2){ out.wl=out.wq[0]; out.wd=out.wq[1]; out.rhoL=out.rho[0]; out.rhoD=out.rho[1]; }
   return out;
 }
 function mcStats(arr){

@@ -188,6 +188,41 @@ def test_execute_run_scenario_file_coverage(tmp_path: Path) -> None:
     assert summary["e2e_percentiles"]["n"] > 0
 
 
+def test_execute_run_workflow_compare_scenario_coverage(tmp_path: Path) -> None:
+    """The workflow-template demo scenario runs through the full pipeline
+    (fast small-count smoke) and traces slice per workflow template."""
+    scenario = (
+        Path(__file__).resolve().parents[1] / "scenarios" / "workflow_compare.yaml"
+    )
+    cfg = OmegaConf.load(scenario)
+    cfg.sim.until = 30.0  # fast smoke variant of the until=200.0 demo
+    cfg.agents.count = 6
+    summary = execute_run(cfg, tmp_path / "workflow-smoke")
+    assert summary["agents"] == 6
+    assert summary["e2e_percentiles"]["n"] > 0
+    assert {k: v for k, v in summary.items() if k.startswith("agents")}
+
+    run_dir = tmp_path / "workflow-smoke"
+    conn = sqlite3.connect(f"file:{run_dir / 'metrics.db'}?mode=ro", uri=True)
+    try:
+        # agent-side rows carry both attrs; endpoint-side rows (llm/db) emit
+        # only agent/request ids, so slice on the workflow attr being present
+        rows = conn.execute(
+            "SELECT json_extract(attrs, '$.workflow_template'), "
+            "json_extract(attrs, '$.workflow_step') FROM trace "
+            "WHERE json_extract(attrs, '$.workflow_template') IS NOT NULL "
+            "GROUP BY 1, 2 ORDER BY 1, 2"
+        ).fetchall()
+        templates = {r[0] for r in rows}
+        assert templates == {"simple_qa", "multi_hop", "rag_batch"}
+        # every template's agent-side step indices run 0..len(steps)-1
+        assert max(r[1] for r in rows if r[0] == "simple_qa") == 1
+        assert max(r[1] for r in rows if r[0] == "multi_hop") == 3
+        assert max(r[1] for r in rows if r[0] == "rag_batch") == 4
+    finally:
+        conn.close()
+
+
 def test_enumerate_sweep_artifacts_and_summary(tmp_path: Path) -> None:
     cfg = scenario_cfg()
     cfg.sweep = OmegaConf.create(

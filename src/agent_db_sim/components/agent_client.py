@@ -1,13 +1,17 @@
 """AgentClient: N closed-loop agents on the simkit kernel.
 
-Each agent runs one continuous loop for the whole simulated duration:
+Each agent walks one *workflow template* — an ordered sequence of
+``inference``/``db`` steps — continuously for the whole simulated duration,
+looping back to step 0 after the last entry (closed loop over the sequence).
+Without ``workflow:`` config every agent uses the legacy alternating template
+``[inference, db]``, which reproduces exactly the v1 loop::
 
     submit inference request (input_tokens, output_tokens)
       -> wait for the inference response
       -> token generator derives the DB hit (QueryProfile draw)
       -> submit DB query (complexity, volume)
       -> wait for the DB response
-      -> repeat
+      -> (repeat, or continue with the next template step)
 
 Ports (typed per the ticket-03 contract; kinds ``req`` / ``response``):
 
@@ -35,15 +39,19 @@ Wiring contract (what a model-assembly ticket does):
 Lifecycle trace events: every send/observation is one probe *edge* sample on
 the probe sink, signal name ``{component}.{stage}`` with component = the
 agent's unique id (``{client.full_path}.agent-{i}``) and stage ``inference``
-or ``db``; tags are exactly ``{agent_id, request_id, parent_id, state}`` and
-the sample value is ``state`` (``submitted`` at send, ``received`` when the
-agent observes the result). Simulated time is passed explicitly (``t=``), so
-emission is correct whatever the sink's clock. ``parent_id`` links a DB query
-to the inference request whose output produced it (None for inference
-requests). Requests carry their ids in ``req.params`` so every downstream hop
-inherits them; ``req.tokens`` is ``input_tokens + output_tokens`` for
-inference requests (what an aggregate token/s cap throttles) and ``0`` for DB
-queries (volume is bandwidth, not tokens).
+or ``db``; tags are ``{agent_id, request_id, parent_id, state,
+workflow_template, workflow_step}`` and the sample value is ``state``
+(``submitted`` at send, ``received`` when the agent observes the result).
+``workflow_template`` is the assigned template's name (``inference_db`` for
+the legacy default), ``workflow_step`` the 0-based index of the step inside
+the template's sequence (it resets to 0 on each wrap-around). Simulated
+time is passed explicitly (``t=``), so emission is correct whatever the
+sink's clock. ``parent_id`` links a DB query to the inference request whose
+output produced it (None for inference requests). Requests carry their ids
+in ``req.params`` (plus ``workflow_template``/``workflow_step``) so every
+downstream hop inherits them; ``req.tokens`` is ``input_tokens +
+output_tokens`` for inference requests (what an aggregate token/s cap
+throttles) and ``0`` for DB queries (volume is bandwidth, not tokens).
 
 Config: the component reads its subtree ``cfg[cfg_key]`` (``cfg_key`` defaults
 to the component name; OmegaConf layers work like plain mappings)::
@@ -60,11 +68,20 @@ to the component name; OmegaConf layers work like plain mappings)::
       query_profiles:    # weighted complexity x volume classes
         - {name: point, complexity: 0.25, volume: 0.05, weight: 0.8}
         - {name: scan,  complexity: 4.0,  volume: 32.0, weight: 0.2}
+      workflow:          # optional; omitted = legacy [inference, db] loop
+        templates:       # ordered steps, drawn from {inference, db}
+          - {name: simple_qa, steps: [inference, db]}
+          - {name: multi_hop, steps: [inference, db, inference, db]}
+        mix: [0.5, 0.5]  # per-agent draw weights; default uniform
 
-RNG: no global random anywhere. Every agent gets two named child streams
-derived deterministically from ``seed/full_path/agent-{i}/{tokens,queries}``
-(the same derivation scheme as the simkit Component base), so per-agent token
-and profile draws are reproducible and mutually independent.
+Each agent draws ONE template from the mix at construct time (its own named
+RNG child stream, see below) and runs it closed-loop.
+
+RNG: no global random anywhere. Every agent gets three named child streams
+derived deterministically from ``seed/full_path/agent-{i}/{tokens,queries,
+workflow}`` (the same derivation scheme as the simkit Component base), so
+per-agent token, profile and template draws are reproducible and mutually
+independent.
 """
 
 from __future__ import annotations
@@ -95,6 +112,10 @@ __all__ = [
     "build_mix",
     "parse_token_generator",
     "parse_query_profiles",
+    "WorkflowTemplate",
+    "WorkflowMix",
+    "parse_workflow",
+    "DEFAULT_WORKFLOW_NAME",
 ]
 
 TokenSampler = Callable[[random.Random, Mapping[str, Any], str], int]
@@ -332,6 +353,149 @@ def build_mix(spec: Any, *, what: str = "query_profiles") -> ProfileMix:
 
 
 # --------------------------------------------------------------------------- #
+# WorkflowTemplate: named per-agent loop shapes and their weighted mix         #
+# --------------------------------------------------------------------------- #
+
+_WORKFLOW_STEPS = ("inference", "db")
+
+#: the implicit template every agent gets without ``workflow:`` config —
+#: the legacy v1 alternating loop, as a round-trip through the generic machinery
+DEFAULT_WORKFLOW_NAME = "inference_db"
+_DEFAULT_WORKFLOW_STEPS: Tuple[str, ...] = ("inference", "db")
+
+
+@dataclass(frozen=True)
+class WorkflowTemplate:
+    """One named agent loop shape: an ordered sequence of steps.
+
+    Steps are drawn from exactly ``inference | db``; the agent walks the
+    sequence from the top and loops back to step 0 after the last entry
+    (closed loop over the sequence).
+    """
+
+    name: str
+    steps: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WorkflowMix:
+    """Normalized weighted mix over WorkflowTemplates; ``draw`` is inverse-CDF."""
+
+    templates: Tuple[WorkflowTemplate, ...]
+    _edges: Tuple[Tuple[float, WorkflowTemplate], ...] = field(repr=False)
+
+    def draw(self, rng: random.Random) -> WorkflowTemplate:
+        """Draw one template (deterministic per the passed RNG stream)."""
+        x = rng.random()
+        for threshold, template in self._edges:
+            if x < threshold:
+                return template
+        return self._edges[-1][1]  # x is in [0, 1); defensive fallthrough
+
+    def names(self) -> Tuple[str, ...]:
+        return tuple(t.name for t in self.templates)
+
+
+def _parse_workflow_template(entry: Any, where: str) -> WorkflowTemplate:
+    if not isinstance(entry, Mapping):
+        raise ComponentError(f"{where}: must be a mapping of name/steps, got {entry!r}")
+    missing = [k for k in ("name", "steps") if k not in entry]
+    if missing:
+        raise ComponentError(f"{where}: missing key(s) {', '.join(missing)}")
+    name = entry["name"]
+    if not isinstance(name, str) or not name:
+        raise ComponentError(f"{where}: 'name' must be a non-empty string, got {name!r}")
+    steps = entry["steps"]
+    if (
+        not isinstance(steps, Sequence)
+        or isinstance(steps, (str, bytes))
+        or len(steps) == 0
+    ):
+        raise ComponentError(f"{where}: 'steps' must be a non-empty list of steps")
+    for i, step in enumerate(steps):
+        if step not in _WORKFLOW_STEPS:
+            raise ComponentError(
+                f"{where}.steps[{i}]: must be one of {', '.join(_WORKFLOW_STEPS)}, "
+                f"got {step!r}"
+            )
+    return WorkflowTemplate(name=name, steps=tuple(steps))
+
+
+def parse_workflow(spec: Any, *, what: str = "workflow") -> WorkflowMix:
+    """Config ``agents.workflow`` (or ``None``) -> validated WorkflowMix.
+
+    ``None`` (no ``workflow:`` key at all) yields the single legacy template
+    ``[inference, db]`` with weight 1, i.e. exactly the v1 alternating loop.
+    ``mix`` is optional; omitted weights default to uniform.
+    """
+    if spec is None:
+        default = WorkflowTemplate(
+            name=DEFAULT_WORKFLOW_NAME, steps=_DEFAULT_WORKFLOW_STEPS
+        )
+        return WorkflowMix(templates=(default,), _edges=((1.0, default),))
+    if not isinstance(spec, Mapping):
+        raise ComponentError(
+            f"{what}: must be a mapping with a 'templates:' list, got {spec!r}"
+        )
+    templates_spec = spec.get("templates")
+    if (
+        not isinstance(templates_spec, Sequence)
+        or isinstance(templates_spec, (str, bytes))
+        or len(templates_spec) == 0
+    ):
+        raise ComponentError(f"{what}: 'templates' must be a non-empty list of templates")
+    templates: List[WorkflowTemplate] = []
+    seen: set = set()
+    for i, entry in enumerate(templates_spec):
+        template = _parse_workflow_template(entry, f"{what}.templates[{i}]")
+        if template.name in seen:
+            raise ComponentError(f"{what}: duplicate template name {template.name!r}")
+        seen.add(template.name)
+        templates.append(template)
+
+    mix_spec = spec.get("mix")
+    weights: List[float]
+    if mix_spec is None:
+        weights = [1.0 / len(templates)] * len(templates)
+    else:
+        if (
+            not isinstance(mix_spec, Sequence)
+            or isinstance(mix_spec, (str, bytes))
+            or len(mix_spec) != len(templates)
+        ):
+            raise ComponentError(
+                f"{what}: 'mix' must be a list of {len(templates)} weights "
+                f"(one per template), got {mix_spec!r}"
+            )
+        weights = []
+        for i, weight in enumerate(mix_spec):
+            try:
+                w = float(weight)
+            except (TypeError, ValueError):
+                raise ComponentError(
+                    f"{what}: mix[{i}] must be a number, got {weight!r}"
+                )
+            if not math.isfinite(w) or w < 0:
+                raise ComponentError(
+                    f"{what}: mix[{i}] must be a finite weight >= 0, got {w}"
+                )
+            weights.append(w)
+    total = sum(weights)
+    if total <= 0:
+        raise ComponentError(
+            f"{what}: at least one mix weight must be > 0 (sum={total})"
+        )
+
+    acc = 0.0
+    edges: List[Tuple[float, WorkflowTemplate]] = []
+    for template, weight in zip(templates, weights):
+        acc += weight / total
+        edges.append((acc, template))
+    edges[-1] = (1.0, edges[-1][1])  # guard against FP drift at the tail
+    return WorkflowMix(templates=tuple(templates), _edges=tuple(edges))
+
+
+# --------------------------------------------------------------------------- #
 # AgentClient component                                                       #
 # --------------------------------------------------------------------------- #
 
@@ -341,8 +505,10 @@ class _AgentWorker:
 
     index: int
     agent_id: str
+    template: WorkflowTemplate
     tokens_rng: random.Random
     profile_rng: random.Random
+    workflow_rng: random.Random  # draws the template once, at construct
     boxes: Dict[str, IngressNone]
     seq: Any = None  # itertools.count incremented lazily in start()
     counters: Dict[str, int] = field(
@@ -381,6 +547,7 @@ class AgentClient(Component):
         self._input_gen: Optional[TokenGenerator] = None
         self._output_gen: Optional[TokenGenerator] = None
         self._mix: Optional[ProfileMix] = None
+        self._workflow: Optional[WorkflowMix] = None
 
     # ------------------------------------------------------------------ #
     # wiring helpers (called between construct and elaborate)             #
@@ -461,6 +628,20 @@ class AgentClient(Component):
         """The configured complexity x volume classes (validated at construct)."""
         return self._mix.profiles if self._mix is not None else ()
 
+    @property
+    def workflow_templates(self) -> Tuple[str, ...]:
+        """Names of the configured workflow templates (``inference_db`` for
+        the legacy default when ``workflow:`` is omitted)."""
+        return self._workflow.names() if self._workflow is not None else ()
+
+    @property
+    def agent_templates(self) -> Tuple[str, ...]:
+        """The workflow template drawn per agent (in construction order).
+
+        One draw per agent at construct time, from the named-mix RNG stream.
+        """
+        return tuple(w.template.name for w in self._workers)
+
     # ------------------------------------------------------------------ #
     # lifecycle                                                           #
     # ------------------------------------------------------------------ #
@@ -471,6 +652,10 @@ class AgentClient(Component):
         seed = master_seed(cfg)
         for index in range(self._count):
             agent_id = f"{self.full_path}.agent-{index}"
+            # the template draw is deterministic per agent and independent of
+            # the token/profile streams (separate named child stream)
+            workflow_rng = random.Random(f"{seed}/{agent_id}/workflow")
+            template = self._workflow.draw(workflow_rng)  # type: ignore[union-attr]
             boxes = {
                 port: IngressNone(env, name=f"{agent_id}.{port}", sink=_NO_INGRESS_PROBE)
                 for port in _RX_PORTS
@@ -478,8 +663,10 @@ class AgentClient(Component):
             worker = _AgentWorker(
                 index=index,
                 agent_id=agent_id,
+                template=template,
                 tokens_rng=random.Random(f"{seed}/{agent_id}/tokens"),
                 profile_rng=random.Random(f"{seed}/{agent_id}/queries"),
+                workflow_rng=workflow_rng,
                 boxes=boxes,
             )
             self._workers.append(worker)
@@ -532,57 +719,92 @@ class AgentClient(Component):
         self._input_gen = parse_token_generator(section["input_tokens"], what=f"{what} input_tokens")
         self._output_gen = parse_token_generator(section["output_tokens"], what=f"{what} output_tokens")
         self._mix = build_mix(section["query_profiles"], what=f"{what} query_profiles")
+        # optional; None (key absent) = legacy [inference, db] loop for everyone
+        workflow_spec = None
+        if "workflow" in section:
+            workflow_spec = section["workflow"]
+        self._workflow = parse_workflow(workflow_spec, what=f"{what} workflow")
 
     def _closed_loop(self, worker: _AgentWorker) -> Any:
-        """One agent's inference -> db loop; runs until the sim ends."""
+        """One agent's template-driven loop; runs until the sim ends.
+
+        Walks ``worker.template.steps`` in order, looping back to step 0 after
+        the last entry, for the whole simulated duration. A ``db`` step links
+        to the most recent inference request (the one whose output produced
+        it; ``None`` before the first inference of the run).
+        """
+        steps = worker.template.steps
+        n_steps = len(steps)
+        step_pos = 0
+        last_inference_id: Optional[str] = None
+        template_name = worker.template.name
         while True:
-            # ---- inference hop -------------------------------------- #
-            n = next(worker.seq)
-            request_id = f"{worker.agent_id}#{n}"
-            input_tokens = self._input_gen.sample(worker.tokens_rng)
-            output_tokens = self._output_gen.sample(worker.tokens_rng)
-            request = Request(
-                params={
-                    "kind": "inference",
-                    "agent_id": worker.agent_id,
-                    "request_id": request_id,
-                    "parent_id": None,
-                    "input_tokens": int(input_tokens),
-                    "output_tokens": int(output_tokens),
-                },
-                tokens=float(int(input_tokens) + int(output_tokens)),
-            )
-            worker.counters["inference_submitted"] += 1
-            self._emit(worker, "inference", "submitted", request_id, parent_id=None)
-            yield self._tx["inference_requests"](request)
+            step = steps[step_pos % n_steps]
+            if step == "inference":
+                n = next(worker.seq)
+                request_id = f"{worker.agent_id}#{n}"
+                input_tokens = self._input_gen.sample(worker.tokens_rng)
+                output_tokens = self._output_gen.sample(worker.tokens_rng)
+                request = Request(
+                    params={
+                        "kind": "inference",
+                        "agent_id": worker.agent_id,
+                        "request_id": request_id,
+                        "parent_id": None,
+                        "input_tokens": int(input_tokens),
+                        "output_tokens": int(output_tokens),
+                        "workflow_template": template_name,
+                        "workflow_step": step_pos % n_steps,
+                    },
+                    tokens=float(int(input_tokens) + int(output_tokens)),
+                )
+                worker.counters["inference_submitted"] += 1
+                self._emit(
+                    worker, "inference", "submitted", request_id,
+                    parent_id=None, step=step_pos % n_steps,
+                )
+                yield self._tx["inference_requests"](request)
 
-            yield worker.boxes["inference_responses"].get()
-            worker.counters["inference_received"] += 1
-            self._emit(worker, "inference", "received", request_id, parent_id=None)
+                yield worker.boxes["inference_responses"].get()
+                worker.counters["inference_received"] += 1
+                self._emit(
+                    worker, "inference", "received", request_id,
+                    parent_id=None, step=step_pos % n_steps,
+                )
+                last_inference_id = request_id
+            else:  # "db"
+                # ---- token generator derives the DB hit ----------------- #
+                profile = self._mix.draw(worker.profile_rng)
+                n = next(worker.seq)
+                db_request_id = f"{worker.agent_id}#{n}"
+                db_request = Request(
+                    params={
+                        "kind": "db_query",
+                        "agent_id": worker.agent_id,
+                        "request_id": db_request_id,
+                        "parent_id": last_inference_id,
+                        "complexity": profile.complexity,
+                        "volume": profile.volume,
+                        "profile": profile.name,
+                        "workflow_template": template_name,
+                        "workflow_step": step_pos % n_steps,
+                    },
+                    tokens=0.0,  # DB volume is bandwidth, not LLM tokens
+                )
+                worker.counters["db_submitted"] += 1
+                self._emit(
+                    worker, "db", "submitted", db_request_id,
+                    parent_id=last_inference_id, step=step_pos % n_steps,
+                )
+                yield self._tx["db_queries"](db_request)
 
-            # ---- token generator derives the DB hit ------------------ #
-            profile = self._mix.draw(worker.profile_rng)
-            n = next(worker.seq)
-            db_request_id = f"{worker.agent_id}#{n}"
-            db_request = Request(
-                params={
-                    "kind": "db_query",
-                    "agent_id": worker.agent_id,
-                    "request_id": db_request_id,
-                    "parent_id": request_id,
-                    "complexity": profile.complexity,
-                    "volume": profile.volume,
-                    "profile": profile.name,
-                },
-                tokens=0.0,  # DB volume is bandwidth, not LLM tokens
-            )
-            worker.counters["db_submitted"] += 1
-            self._emit(worker, "db", "submitted", db_request_id, parent_id=request_id)
-            yield self._tx["db_queries"](db_request)
-
-            yield worker.boxes["db_responses"].get()
-            worker.counters["db_received"] += 1
-            self._emit(worker, "db", "received", db_request_id, parent_id=request_id)
+                yield worker.boxes["db_responses"].get()
+                worker.counters["db_received"] += 1
+                self._emit(
+                    worker, "db", "received", db_request_id,
+                    parent_id=last_inference_id, step=step_pos % n_steps,
+                )
+            step_pos += 1
 
     def _emit(
         self,
@@ -591,6 +813,7 @@ class AgentClient(Component):
         state: str,
         request_id: str,
         parent_id: Optional[str],
+        step: int,
     ) -> None:
         """One lifecycle edge sample: {component}.{stage}, typed attrs, explicit t."""
         self.sink.edge(
@@ -601,6 +824,8 @@ class AgentClient(Component):
             request_id=request_id,
             parent_id=parent_id,
             state=state,
+            workflow_template=worker.template.name,
+            workflow_step=step,
         )
 
 

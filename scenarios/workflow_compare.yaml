@@ -1,0 +1,76 @@
+# workflow_compare.yaml — agent workflow-template comparison demo.
+#
+# The same agent count / LLM / DB as topology_compare.yaml, but the eight
+# agents draw between three different loop shapes at construct time
+# (weighted mix 0.5 / 0.3 / 0.2), so the workload split on the serving side
+# stays mixed while the per-agent shapes differ:
+#
+#   simple_qa   [inference, db]                      — v1 alternating loop
+#   multi_hop   [inference, db, inference, db]       — two-hop reasoning
+#   rag_batch   [inference, db, db, inference, db]   — one inference, 2 DB hits
+#
+# Each agent runs its drawn template closed-loop over the sequence for the
+# whole simulated duration; a DB step links to the most recent inference
+# request. Trace samples carry `workflow_template` / `workflow_step` in the
+# lifecycle attrs, so metrics.db can slice e.g.:
+#
+#   sqlite3 metrics.db "SELECT json_extract(attrs,'$.workflow_template'),
+#     count(*) FROM trace WHERE state='submitted' GROUP BY 1"
+#
+#   agent-db-sim run scenarios/workflow_compare.yaml [--out runs]
+
+sim:
+  until: 200.0
+  seed: 23
+
+agents:
+  count: 8
+  input_tokens:
+    distribution: fixed
+    value: 256
+  output_tokens:
+    distribution: fixed
+    value: 128
+  query_profiles:
+    - name: point_read      # cheap complexity, tiny volume
+      complexity: 0.2
+      volume: 0.05
+      weight: 0.8
+    - name: wide_scan       # heavier complexity, bulky volume
+      complexity: 0.6
+      volume: 2.0
+      weight: 0.2
+  workflow:
+    templates:
+      - name: simple_qa
+        steps: [inference, db]
+      - name: multi_hop
+        steps: [inference, db, inference, db]
+      - name: rag_batch
+        steps: [inference, db, db, inference, db]
+    mix: [0.5, 0.3, 0.2]
+
+llm:
+  slots: 8                  # one slot per agent: no LLM queueing
+  input_tokens_per_s: 4000  # ~0.064 u per request input phase
+  output_tokens_per_s: 2000 # ~0.064 u per request output phase
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 4
+  storage_nodes: 2
+  coordinators: 2
+  compute:
+    slots: 2                # per compute node
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: nvme
+  network:
+    latency: 0.01           # per hop: visible against ~0.2 u compute costs
+    bandwidth: 500.0        # scan responses (2 GB) take ~4 ms in transfer
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2   # distributed coordinator compute multiplier

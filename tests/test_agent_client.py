@@ -18,7 +18,12 @@ import pytest
 import simpy
 
 from agent_db_sim.components import AgentClient
-from agent_db_sim.components.agent_client import build_mix, parse_token_generator
+from agent_db_sim.components.agent_client import (
+    DEFAULT_WORKFLOW_NAME,
+    build_mix,
+    parse_token_generator,
+    parse_workflow,
+)
 from agent_db_sim.simkit.component import Composite
 from agent_db_sim.simkit.errors import ComponentError, WiringError
 from agent_db_sim.simkit.ingress import Request
@@ -482,3 +487,306 @@ def test_parse_token_generator_registry_and_draws() -> None:
         parse_token_generator({"distribution": "gamma", "shape": 2.0}, what="x")
     with pytest.raises(ComponentError, match="0 < p <= 1"):
         parse_token_generator({"distribution": "geometric", "p": 0.0}, what="x").sample(Random(0))
+
+
+# --------------------------------------------------------------------------- #
+# agent workflow templates (mix draw + step-sequence loop)                     #
+# --------------------------------------------------------------------------- #
+
+def construct_workflow(cfg_agents: Dict[str, Any]) -> Tuple[AgentClient, Any]:
+    """Build one constructed (not run) AgentClient for config-level tests."""
+    top = Composite("top")
+    client = AgentClient("agents")
+    top.add(client)
+    llm = FakeServer("llm", host=client, port="inference_responses", delay=1.0)
+    top.add(llm)
+    client.bind_output("inference_requests", llm.submit)
+    client.bind_output("db_queries", llm.submit)
+    top.construct(simpy.Environment(), {"sim": {"seed": 3}, "agents": cfg_agents})
+    return client, top
+
+
+def test_workflow_template_assignment_honors_mix() -> None:
+    cfg = dict(
+        AGENT_CFG,
+        count=30,
+        workflow={
+            "templates": [
+                {"name": "a", "steps": ["inference", "db"]},
+                {"name": "b", "steps": ["inference", "db", "inference", "db"]},
+                {"name": "c", "steps": ["inference", "db", "db"]},
+            ],
+            "mix": [0.5, 0.3, 0.2],
+        },
+    )
+    client, _ = construct_workflow(cfg)
+
+    # one template per agent, drawn from the configured mix (seeded counts)
+    assert client.workflow_templates == ("a", "b", "c")
+    templates = Counter(client.agent_templates)
+    assert sum(templates.values()) == 30
+    counts_a = templates
+
+    # assignment is reproducible per seed and tracks the mix proportions loosely
+    counts_b = Counter(construct_workflow(cfg)[0].agent_templates)
+    assert counts_a == counts_b  # same seed -> same draws
+    for name, weight in (("a", 0.5), ("b", 0.3), ("c", 0.2)):
+        got = counts_a[name] / 30
+        assert abs(got - weight) <= 0.15, (name, got, weight)
+
+
+def test_workflow_assignment_uniform_when_mix_omitted() -> None:
+    cfg = dict(
+        AGENT_CFG,
+        count=4,
+        workflow={
+            "templates": [
+                {"name": "x", "steps": ["inference", "db"]},
+                {"name": "y", "steps": ["inference", "db", "db"]},
+            ],
+        },
+    )
+    client, _ = construct_workflow(cfg)
+    names = Counter(client.agent_templates)
+    assert set(names) == {"x", "y"} and sum(names.values()) == 4
+
+
+def test_legacy_default_workflow_when_key_absent() -> None:
+    client, _ = construct_workflow(AGENT_CFG)
+    assert client.workflow_templates == ("inference_db",)
+    assert client.agent_templates == ("inference_db",) * client.count
+
+
+def test_workflow_loop_follows_sequence_order_and_step_indices() -> None:
+    # template [inference, db, db], llm_delay=2, db_delay=1:
+    # pass 1: inf#1 sub@0 rcv@2 -> db#2 sub@2 rcv@3 -> db#3 sub@3 rcv@4
+    # pass 2: inf#4 sub@4 (in flight at the 5.5 horizon)
+    cfg = dict(
+        AGENT_CFG,
+        workflow={
+            "templates": [{"name": "double_db", "steps": ["inference", "db", "db"]}],
+            "mix": [1.0],
+        },
+    )
+    sink, collected, client, llm, db = run_agents(
+        cfg, llm_delay=2.0, db_delay=1.0, until=5.5
+    )
+    assert client.agent_templates == ("double_db",)
+
+    counts = collected["agents"][AGENT_ID]
+    assert counts == {
+        "inference_submitted": 2,
+        "inference_received": 1,
+        "db_submitted": 2,
+        "db_received": 2,
+    }
+
+    infinity = edges(sink, f"{AGENT_ID}.inference")
+    assert [(s.t, s.value, s.tags["workflow_step"], s.tags["request_id"]) for s in infinity] == [
+        (0.0, "submitted", 0, f"{AGENT_ID}#1"),
+        (2.0, "received", 0, f"{AGENT_ID}#1"),
+        (4.0, "submitted", 0, f"{AGENT_ID}#4"),
+    ]
+
+    dbh = edges(sink, f"{AGENT_ID}.db")
+    assert [(s.t, s.value, s.tags["workflow_step"], s.tags["request_id"]) for s in dbh] == [
+        (2.0, "submitted", 1, f"{AGENT_ID}#2"),
+        (3.0, "received", 1, f"{AGENT_ID}#2"),
+        (3.0, "submitted", 2, f"{AGENT_ID}#3"),
+        (4.0, "received", 2, f"{AGENT_ID}#3"),
+    ]
+
+    # both db steps of the pass link to the pass's inference request
+    assert all(s.tags["workflow_template"] == "double_db" for s in infinity + dbh)
+    db_params = [req.params for req in db.submitted]
+    assert db_params[0]["parent_id"] == f"{AGENT_ID}#1"
+    assert db_params[1]["parent_id"] == f"{AGENT_ID}#1"
+    assert db_params[0]["workflow_template"] == "double_db"
+    assert db_params[0]["workflow_step"] == 1
+    assert db_params[1]["workflow_step"] == 2
+    inf_params = [req.params for req in llm.submitted]
+    assert all(p["parent_id"] is None for p in inf_params)
+    assert inf_params[0]["workflow_template"] == "double_db"
+
+
+def test_backward_compat_default_equals_old_alternating_behavior() -> None:
+    """No ``workflow:`` key must reproduce the v1 inference->db loop exactly."""
+    def fingerprint(cfg_agents: Dict[str, Any]) -> Tuple[
+        List[Tuple[float, str, str]], Dict[str, Any], List[int], List[int]
+    ]:
+        sink, collected, client, llm, db = run_agents(
+            cfg_agents, llm_delay=3.0, db_delay=1.0, until=17.0
+        )
+        times = [(s.t, s.signal, s.value) for s in sink.samples]
+        tokens = [r.params["output_tokens"] for r in llm.submitted]
+        profiles = [r.params["profile"] for r in db.submitted]
+        return times, collected, tokens, profiles
+
+    legacy = fingerprint(AGENT_CFG)
+    explicit = fingerprint(
+        dict(
+            AGENT_CFG,
+            workflow={"templates": [{"name": "x", "steps": ["inference", "db"]}]},
+        )
+    )
+    assert legacy[0] == explicit[0]  # identical edge-sample stream
+    assert legacy[1] == explicit[1]  # identical counters
+    assert legacy[2] == explicit[2] and legacy[3] == explicit[3]  # identical draws
+
+    # and the implicit template still tags samples with alternating steps
+    times, collected, _, _ = legacy
+    inference = [s for s in times if s[1] == f"{AGENT_ID}.inference"]
+    assert inference == [
+        (0.0, f"{AGENT_ID}.inference", "submitted"),
+        (3.0, f"{AGENT_ID}.inference", "received"),
+        (4.0, f"{AGENT_ID}.inference", "submitted"),
+        (7.0, f"{AGENT_ID}.inference", "received"),
+        (8.0, f"{AGENT_ID}.inference", "submitted"),
+        (11.0, f"{AGENT_ID}.inference", "received"),
+        (12.0, f"{AGENT_ID}.inference", "submitted"),
+        (15.0, f"{AGENT_ID}.inference", "received"),
+        (16.0, f"{AGENT_ID}.inference", "submitted"),
+    ]
+
+
+def test_workflow_attrs_in_emitted_samples_and_requests() -> None:
+    cfg = dict(
+        AGENT_CFG,
+        count=4,
+        workflow={
+            "templates": [
+                {"name": "simple_qa", "steps": ["inference", "db"]},
+                {"name": "double_db", "steps": ["inference", "db", "db"]},
+            ],
+        },
+    )
+    sink, _, client, llm, db = run_agents(cfg, llm_delay=0.05, db_delay=0.05, until=1.0)
+
+    template_by_agent = dict(zip(client.agent_ids, client.agent_templates))
+    seen_templates = set()
+    for sample in sink.samples:
+        if sample.kind != "edge":
+            continue
+        template = sample.tags["workflow_template"]
+        step = sample.tags["workflow_step"]
+        assert isinstance(step, int) and 0 <= step <= 2
+        assert template == template_by_agent[sample.tags["agent_id"]]
+        seen_templates.add(sample.tags["workflow_template"])
+    assert seen_templates == {"simple_qa", "double_db"}
+
+    # every inference and db request carries the workflow attrs downstream
+    for req in llm.submitted:
+        agent_template = template_by_agent[req.params["agent_id"]]
+        assert req.params["workflow_template"] == agent_template
+        assert req.params["workflow_step"] == 0
+    for req in db.submitted:
+        agent_template = template_by_agent[req.params["agent_id"]]
+        assert req.params["workflow_template"] == agent_template
+        # db steps are at index 1 (simple_qa) or 1/2 (double_db)
+        assert req.params["workflow_step"] in (1, 2)
+
+
+def test_workflow_config_fail_fast() -> None:
+    with pytest.raises(ComponentError, match="workflow"):
+        construct_workflow(dict(AGENT_CFG, workflow="nope"))
+
+    with pytest.raises(ComponentError, match="templates"):
+        construct_workflow(dict(AGENT_CFG, workflow={}))
+
+    with pytest.raises(ComponentError, match="unknown|must be one of"):
+        construct_workflow(
+            dict(
+                AGENT_CFG,
+                workflow={
+                    "templates": [{"name": "x", "steps": ["inference", "llm"]}],
+                },
+            )
+        )
+
+    with pytest.raises(ComponentError, match="non-empty list of steps"):
+        construct_workflow(
+            dict(AGENT_CFG, workflow={"templates": [{"name": "x", "steps": []}]})
+        )
+
+    with pytest.raises(ComponentError, match="duplicate template name"):
+        construct_workflow(
+            dict(
+                AGENT_CFG,
+                workflow={
+                    "templates": [
+                        {"name": "x", "steps": ["inference", "db"]},
+                        {"name": "x", "steps": ["db"]},
+                    ],
+                },
+            )
+        )
+
+    with pytest.raises(ComponentError, match="list of 2 weights"):
+        construct_workflow(
+            dict(
+                AGENT_CFG,
+                workflow={
+                    "templates": [
+                        {"name": "x", "steps": ["inference", "db"]},
+                        {"name": "y", "steps": ["db"]},
+                    ],
+                    "mix": [1.0, 1.0, 1.0],
+                },
+            )
+        )
+
+    with pytest.raises(ComponentError, match="mix\\[0\\]"):
+        construct_workflow(
+            dict(
+                AGENT_CFG,
+                workflow={
+                    "templates": [
+                        {"name": "x", "steps": ["inference", "db"]},
+                        {"name": "y", "steps": ["db"]},
+                    ],
+                    "mix": [-1.0, 1.0],
+                },
+            )
+        )
+
+    with pytest.raises(ComponentError, match="at least one mix weight"):
+        construct_workflow(
+            dict(
+                AGENT_CFG,
+                workflow={
+                    "templates": [
+                        {"name": "x", "steps": ["inference", "db"]},
+                        {"name": "y", "steps": ["db"]},
+                    ],
+                    "mix": [0.0, 0.0],
+                },
+            )
+        )
+
+
+def test_parse_workflow_unit_contract() -> None:
+    # None (no workflow: key) -> legacy default template, weight 1
+    legacy = parse_workflow(None)
+    assert legacy.names() == (DEFAULT_WORKFLOW_NAME,)
+    assert legacy.draw(Random(0)).steps == ("inference", "db")
+    assert DEFAULT_WORKFLOW_NAME == "inference_db"
+
+    # omitted mix -> uniform; weights are normalized, not required to sum to 1
+    mix = parse_workflow(
+        {
+            "templates": [
+                {"name": "a", "steps": ["inference", "db"]},
+                {"name": "b", "steps": ["inference", "db", "db"]},
+            ],
+            "mix": [1, 3],
+        }
+    )
+    class Fixed:
+        def __init__(self, value: float) -> None:
+            self._value = value
+        def random(self) -> float:
+            return self._value
+
+    assert mix.draw(Fixed(0.0)).name == "a"
+    assert mix.draw(Fixed(0.25)).name == "b"
+    assert mix.draw(Fixed(0.99)).name == "b"

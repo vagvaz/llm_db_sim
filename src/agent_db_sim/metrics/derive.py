@@ -5,9 +5,10 @@ per-run ``metrics.db``:
 
 - **Percentiles** (per-request distributions): stage latencies and
   end-to-end agent latency; p50/p95/p99 via linear interpolation.
-- **Utilization** (time-weighted): ``level`` samples become piecewise
-  step functions sampled at ``sample_interval`` ticks; ``counter`` samples
-  named ``*token*`` become per-tick throughput rates.
+- **Utilization** (time-weighted): ``level`` samples from the raw
+  ``samples`` table (the streaming row log) become piecewise step functions
+  sampled at ``sample_interval`` ticks; ``counter`` samples named
+  ``*token*`` become per-tick throughput rates.
 - **Bottleneck attribution** (hybrid): primary = queueing-delay share of
   agent latency per ``(component, stage)``; supporting = saturation score
   (time-weighted utilization fraction of the component's capacity, with a
@@ -21,6 +22,7 @@ window.
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -311,6 +313,64 @@ def step_mean(
 def derive_utilization(
     conn: sqlite3.Connection,
     *,
+    warmup_end: float,
+    t_end: float,
+    sample_interval: float,
+) -> None:
+    """Write ``utilization_series`` + ``utilization_stats`` + ``token_rate_series``.
+
+    Reads the raw ``samples`` table (the live row log written by the
+    streaming TraceWriter) instead of an in-memory sample list:
+
+    - ``level`` samples -> per (signal, component) step functions; series
+      rows evaluated at each ``sample_interval`` tick in ``(warmup_end,
+      t_end]`` (last-value-hold). Stats mean/peak: time-weighted mean over
+      ``[warmup_end, t_end]``; peak = max observed post-warmup sample.
+    - ``mean_util``: value/capacity when the samples carry a capacity
+      (``capacity`` or ``slots`` tag) — for queue-depth signals without a
+      capacity it falls back to the nonempty-queue time fraction.
+    - Token signals (``*token*`` counters): cumulative sums -> per-tick
+      throughput rates.
+    """
+    level_points: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+    capacities: Dict[Tuple[str, str], float] = {}
+    for t, signal, value, tags_json in conn.execute(
+        "SELECT t, signal, value, tags FROM samples "
+        "WHERE kind = 'level' ORDER BY id"
+    ):
+        tags = json.loads(tags_json)
+        key = (signal, str(tags.get("component", "")))
+        level_points.setdefault(key, []).append((float(t), float(json.loads(value))))
+        for cap_tag in ("capacity", "slots"):
+            if cap_tag in tags:
+                capacities.setdefault(key, float(tags[cap_tag]))
+
+    token_points: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+    for t, signal, value, tags_json in conn.execute(
+        "SELECT t, signal, value, tags FROM samples "
+        "WHERE kind = 'counter' ORDER BY id"
+    ):
+        if "token" not in signal.lower():
+            continue
+        comp = str(json.loads(tags_json).get("component", ""))
+        token_points.setdefault((signal, comp), []).append(
+            (float(t), float(json.loads(value)))
+        )
+
+    _write_utilization(
+        conn,
+        level_points=level_points,
+        token_points=token_points,
+        capacities=capacities,
+        warmup_end=warmup_end,
+        t_end=t_end,
+        sample_interval=sample_interval,
+    )
+
+
+def _write_utilization(
+    conn: sqlite3.Connection,
+    *,
     level_points: Dict[Tuple[str, str], List[Tuple[float, float]]],
     token_points: Dict[Tuple[str, str], List[Tuple[float, float]]],
     capacities: Dict[Tuple[str, str], float],
@@ -318,18 +378,7 @@ def derive_utilization(
     t_end: float,
     sample_interval: float,
 ) -> None:
-    """Write ``utilization_series`` + ``utilization_stats`` + ``token_rate_series``.
-
-    - Series rows: evaluated at each ``sample_interval`` tick multiple in
-      ``(warmup_end, t_end]`` (last-value-hold per (signal, component)).
-    - Stats mean/peak: per (signal, component), mean integrated time-weighted
-      over ``[warmup_end, t_end]``; peak = max observed post-warmup sample.
-    - ``mean_util``: value/capacity when the samples carry a capacity
-      (``capacity`` or ``slots`` tag) — for queue-depth signals without a
-      capacity it falls back to the nonempty-queue time fraction.
-    - Token signals (``*token*`` counters): cumulative sums -> per-tick
-      throughput rates.
-    """
+    """Core utilization writer over pre-grouped step-function points."""
     ticks = _ticks(warmup_end, t_end, sample_interval)
 
     for (signal, comp), points in level_points.items():

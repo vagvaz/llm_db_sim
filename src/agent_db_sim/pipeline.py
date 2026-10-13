@@ -6,11 +6,14 @@ goes through:
 1. config snapshot -> ``<run-dir>/config.yaml``
 2. build the model (registry ``build_model``: AgentClient + LLMEndpoint +
    DBEndpoint wired per the ticket-03 connect graph) and simulate until
-   ``sim.until`` on one shared :class:`InMemorySink`
-3. metrics: the same sink -> ``collect_run`` -> ``<run-dir>/metrics.db``
-   (traces + derived percentile / utilization / bottleneck-attribution
-   tables)
-4. viz: the same sink -> ``write_vcd`` -> ``<run-dir>/run.vcd``
+   ``sim.until``; the shared sink is a **bounded** :class:`InMemorySink`
+   (active-request index only) subscribed to a streaming ``RunCollector``
+3. metrics: samples stream live into ``<run-dir>/metrics.db`` during the
+   run (trace + samples tables, batched); ``collector.finalize()`` then
+   computes the derived tables (percentiles / utilization / bottleneck
+   attribution) from SQLite — finished-request history lives only on disk
+4. viz: the ``samples`` table -> ``rebuild_samples`` -> ``write_vcd`` ->
+   ``<run-dir>/run.vcd``
 5. reports: the standard report rendered from ``metrics.db`` ->
    ``<run-dir>/report.html`` (standalone, vendored plotly)
 6. a compact ``summary.json`` with the destination's analytical numbers:
@@ -33,7 +36,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from omegaconf import OmegaConf
 
-from agent_db_sim.metrics.collect import collect_run
+from agent_db_sim.metrics.collect import (
+    rebuild_samples,
+    start_collection,
+)
 from agent_db_sim.simkit.probes import InMemorySink
 from agent_db_sim.simkit.registry import build_model
 from agent_db_sim.simkit.runner import run_model
@@ -65,12 +71,25 @@ def execute_run(cfg: Any, run_dir: Any) -> Dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg, run_dir / "config.yaml")
 
-    sink = InMemorySink()  # clock is attached by the model at construct
-    top = build_model(cfg, sink=sink)
-    result = run_model(top, cfg, until=sim_until(cfg), sink=sink)
+    # Bounded sink: only the active-request index stays in memory; EVERY
+    # sample (lifecycle edges + level/counter) streams into metrics.db live
+    # through the subscribed batched TraceWriter (flushes at batch-size and
+    # sample_interval tick boundaries; a failed flush fails the run loudly).
+    # Emitters pass explicit simulated times, so the sink clock is unused.
+    sink = InMemorySink(bounded=True)
+    collector = start_collection(run_dir, sink, cfg)  # opens metrics.db first
+    try:
+        top = build_model(cfg, sink=sink)
+        result = run_model(top, cfg, until=sim_until(cfg), sink=sink)
+    except BaseException:
+        collector.abort()  # loud failure: close without deducing a report
+        raise
 
-    db_path = collect_run(run_dir, sink, cfg)
-    vcd_path = write_vcd(run_dir / "run.vcd", sink.samples)
+    db_path = collector.finalize()  # tail flush + indexes + derived-from-SQLite
+    # Finished-request history now lives only in metrics.db; rebuild the
+    # full sample sequence from the samples table for the one-shot VCD
+    # writer (run.vcd is materialized, not retained in memory).
+    vcd_path = write_vcd(run_dir / "run.vcd", rebuild_samples(db_path))
     report_path = _render_standard_report(run_dir)
 
     summary = summarize_run(run_dir, collected=result.collected)

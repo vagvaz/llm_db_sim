@@ -23,3 +23,9 @@ Chronological log of orchestration decisions and stage completions. Tickets hold
 **Git.** Repo initialized: master + 2 research branches pushed to github.com:vagvaz/llm_db_sim.
 
 **Stage: parallel component build (in progress).** Dispatched fix-3 (08 AgentClient), fix-4 (09 LLMEndpoint), fix-5 (10 DBEndpoint, reuses fix-2), fix-6 (11 Metrics collector). Guards: shared wire contract pinned in every brief (ports, attrs, trace-as-edge-probe-samples contract from 04); single-writer ownership (10 owns registry.py/build_model; others never touch simkit); no map.md edits by workers (orchestrator reconciles); no worker commits (orchestrator commits per completed ticket/stage). Commit policy: one commit per resolved ticket; push per stage.
+
+**08 task (resolved).** AgentClient: N config-driven agents, closed loop inference→token generator→QueryProfile DB query; rendezvous ingress for exact response routing; named seeded RNG streams per agent; distributions registry + weighted profile mixes. 14 tests green. fix-3.
+
+**09 task (resolved).** LLMEndpoint: two-phase input/output token service on SlotServer; slots + fair-shared aggregate token/s cap; submit/wait/response_of API; lifecycle edges + counters/occupancy probes. 16 tests green. fix-4.
+
+**11 task (resolved).** Metrics collector: batched SQLite TraceWriter (bounded buffer, indexes at finalize); derived percentile/utilization/token-rate/hybrid-attribution tables at collect_run(); warm-up + sample_interval config; component-level stage fallback for split hops. 13 tests green (59 slice tests green post-landing). fix-6.

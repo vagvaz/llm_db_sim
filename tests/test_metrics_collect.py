@@ -385,3 +385,108 @@ def test_non_lifecycle_samples_are_not_trace_rows(tmp_path: Path) -> None:
     rows = conn.execute("SELECT state FROM trace").fetchall()
     assert rows == [("held",)]  # levels/counters skipped; non-canonical kept
     conn.close()
+
+
+# --------------------------------------------------------------------- #
+# ticket-13 defect: sat_score vs probe-tag component names                #
+# --------------------------------------------------------------------- #
+
+
+def test_saturation_scores_peak_proxy_excludes_rate_rows(tmp_path: Path) -> None:
+    from agent_db_sim.metrics.derive import create_derived, saturation_scores
+
+    conn = sqlite3.connect(":memory:")
+    create_derived(conn)
+    # occupancy count without a capacity tag -> mean / observed peak
+    conn.execute(
+        "INSERT INTO utilization_stats VALUES ('slot_busy', 'compute-0', 1.0, 2.0, NULL)"
+    )
+    # staged bandwidth level without a capacity tag -> same proxy
+    conn.execute(
+        "INSERT INTO utilization_stats VALUES ('level', 'top.db.seg-0', 0.5, 2.0, NULL)"
+    )
+    # counter throughput rows are never sat signals
+    conn.execute(
+        "INSERT INTO utilization_stats VALUES ('tokens.rate', 'llm', 5.0, 5.0, NULL)"
+    )
+    # queue depth: mean_util (nonempty fraction) used directly
+    conn.execute(
+        "INSERT INTO utilization_stats VALUES ('queue_depth', 'compute-0.ingress', 3.0, 5.0, 1.0)"
+    )
+    scores = saturation_scores(conn)
+    assert scores["compute-0"] == pytest.approx(0.5)
+    assert scores["top.db.seg-0"] == pytest.approx(0.25)
+    assert scores["compute-0.ingress"] == pytest.approx(1.0)
+    assert "llm" not in scores  # the *.rate row must not score anything
+    conn.close()
+
+
+def test_sat_for_hierarchical_matching() -> None:
+    from agent_db_sim.metrics.derive import _sat_for
+
+    tags = {"compute-0": 0.4, "compute-0.ingress": 0.6, "llm.server": 0.3}
+    # trace components carry the hierarchical path; probe tags the bare leaf
+    assert _sat_for("top.db.compute-0", tags) == pytest.approx(0.6)
+    # sub-parts of the node pool into the component; unrelated leaves don't
+    assert _sat_for("llm", tags) == pytest.approx(0.3)
+    assert _sat_for("top.db.compute-1", tags) == 0.0
+    # an exact tag hit always wins over embedded matches
+    exact = {"top.db.compute-0": 0.2, "compute-0": 0.4}
+    assert _sat_for("top.db.compute-0", exact) == pytest.approx(0.2)
+    assert _sat_for("anything", {}) == 0.0
+
+
+def test_attribution_sat_score_matches_hierarchical_probe_tags(
+    tmp_path: Path,
+) -> None:
+    """Deliberately saturated db compute node: bare-name level probes
+    (``compute-0``, child ``compute-0.ingress``) must score the hierarchically
+    addressed trace component (``top.db.compute-0.*``)."""
+    sink = InMemorySink()
+    comp = "top.db.compute-0"
+    # 2 requests: llm hop queue 2 (no level samples -> sat fallback 0),
+    # db compute hop queue 15 / service 3; per request e2e = 25
+    for i in (0, 1):
+        t_sub = 5.0 * i
+        edge(sink, t_sub, "agent.loop", "submitted", "a", f"r{i}")
+        edge(sink, t_sub, "top.llm.request", "submitted", "a", f"r{i}", parent=f"r{i}")
+        edge(sink, t_sub + 2.0, "top.llm.request", "processing", "a", f"r{i}", parent=f"r{i}")
+        edge(sink, t_sub + 5.0, "top.llm.request", "completed", "a", f"r{i}", parent=f"r{i}")
+        edge(sink, t_sub + 5.0, f"{comp}.compute_issue", "submitted", "a", f"r{i}", parent=f"r{i}")
+        edge(sink, t_sub + 20.0, f"{comp}.compute_issue", "processing", "a", f"r{i}", parent=f"r{i}")
+        edge(sink, t_sub + 23.0, f"{comp}.compute_issue", "completed", "a", f"r{i}", parent=f"r{i}")
+        edge(sink, t_sub + 25.0, "agent.loop", "received", "a", f"r{i}")
+    # saturated server: slots=2, both busy over the whole post-warmup window,
+    # tagged with the bare node name and no capacity tag (peak proxy);
+    # the admission ingress (child tag) never drains (nonempty fraction 1.0)
+    sink.sample("slot_busy", 2, t=0.0, component="compute-0")
+    sink.sample("slot_busy", 2, t=15.0, component="compute-0")
+    sink.sample("slot_busy", 2, t=30.0, component="compute-0")
+    sink.sample("queue_depth", 1, t=0.0, component="compute-0.ingress")
+
+    db_path = collect_run(tmp_path / "run-hier", sink, cfg={"warmup": 0.0})
+    conn = sqlite3.connect(db_path)
+    rows = {
+        (component, stage): (queue_share, sat_score, score)
+        for component, stage, _, queue_share, sat_score, score in conn.execute(
+            "SELECT component, stage, queue_delay, queue_share, sat_score, score "
+            "FROM bottleneck"
+        )
+    }
+    db_row = rows[(comp, "compute_issue")]
+    llm_row = rows[("top.llm", "request")]
+    # shares of the 50 total e2e: db queue = 30, llm queue = 4
+    assert db_row[0] == pytest.approx(30.0 / 50.0)
+    assert llm_row[0] == pytest.approx(4.0 / 50.0)
+    # saturation flows through: saturated node scores 1.0, the
+    # no-samples component falls back to 0.0; hybrid formula is unchanged
+    assert db_row[1] == pytest.approx(1.0)
+    assert db_row[2] == pytest.approx(0.7 * 30.0 / 50.0 + 0.3 * 1.0)
+    assert llm_row[1] == 0.0
+    assert llm_row[2] == pytest.approx(0.7 * 4.0 / 50.0)
+    # the saturated node is the bottleneck winner
+    ranked = conn.execute(
+        "SELECT component, stage FROM bottleneck ORDER BY score DESC"
+    ).fetchall()
+    assert ranked[0] == (comp, "compute_issue")
+    conn.close()

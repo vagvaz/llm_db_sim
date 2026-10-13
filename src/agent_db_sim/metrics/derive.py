@@ -419,6 +419,56 @@ def _ticks(warmup_end: float, t_end: float, interval: float) -> List[float]:
 QUEUE_SHARE_WEIGHT = 0.7
 SATURATION_WEIGHT = 0.3
 
+# Level signals that are occupancy *counts* (slots busy, staging volume)
+# rather than queue depths: their samples carry no capacity tag today, so
+# ``mean_util`` stays NULL and saturation falls back to mean / observed peak
+# (exact when the component saturated at least once, which is precisely when
+# the supporting signal matters for attribution).
+OCCUPANCY_SIGNALS = frozenset({"slot_busy", "level"})
+
+
+def _hier_match(left: str, right: str) -> bool:
+    """Hierarchical component-name match (``split_signal`` semantics).
+
+    Component names are dotted hierarchical paths (``top.db.compute-0``);
+    probe tags may carry the bare leaf (``compute-0``), a sub-part of the
+    same node (``compute-0.ingress``, ``llm.server``) or the full path
+    (``top.db.seg-0``); the admission-queue tag sits mid-path
+    (``top.db`` + ``compute-0.ingress``), so matching is contiguous segment
+    embedding of one path in the other.
+    """
+    a = left.split(".")
+    b = right.split(".")
+    if len(a) > len(b):
+        a, b = b, a
+
+    def embeds(path: List[str], long: List[str]) -> bool:
+        n = len(path)
+        return any(long[i:i + n] == path for i in range(len(long) - n + 1))
+
+    if embeds(a, b):
+        return True
+    # a probe sub-part of the node (``compute-0.ingress``) belongs to the
+    # node itself: drop the sub-part leaf and match on the parent path
+    return len(a) > 1 and embeds(a[:-1], b)
+
+
+def _sat_for(comp: str, sat_by_component: Dict[str, float]) -> float:
+    """Saturation score for a trace component, matched hierarchically.
+
+    An exact probe-tag hit wins; otherwise the best (max) score among tags
+    that hierarchically embed the trace component (or are embedded by it)
+    is used, 0.0 when nothing matches.
+    """
+    exact = sat_by_component.get(comp)
+    if exact is not None:
+        return float(exact)
+    best = 0.0
+    for tag, score in sat_by_component.items():
+        if _hier_match(comp, tag):
+            best = max(best, float(score))
+    return best
+
 
 def derive_bottleneck(
     conn: sqlite3.Connection,
@@ -448,7 +498,7 @@ def derive_bottleneck(
 
     rows = []
     for (comp, stage), qsum in sorted(queue_sums.items()):
-        sat = float(sat_by_component.get(comp, 0.0))
+        sat = _sat_for(comp, sat_by_component)
         share = qsum / e2e_total
         rows.append(
             (
@@ -467,13 +517,31 @@ def derive_bottleneck(
 def saturation_scores(conn: sqlite3.Connection) -> Dict[str, float]:
     """Component-level saturation score from ``utilization_stats``.
 
-    ``mean_util`` is the utilization fraction signal; a component's score is
+    The utilization fraction signal is ``mean_util``: capacity-normalized
+    where the samples carry a ``capacity``/``slots`` tag, the nonempty-queue
+    time fraction for depth signals without one. Rows without that
+    normalization are still scored when the signal is a known occupancy
+    count (:data:`OCCUPANCY_SIGNALS`): time-weighted mean over the observed
+    peak. ``*.rate`` counter rows are never scored. A component's score is
     the max across its sampled signals (0.0 when nothing utilizable was
-    sampled). This is the supporting signal of the hybrid attribution.
+    sampled); the table is keyed by the probe-sink component *tag* — the
+    attribution layer matches trace components against those tags
+    hierarchically (see :func:`_sat_for`).
     """
     out: Dict[str, float] = {}
-    for comp, mean_util in conn.execute(
-        "SELECT component, mean_util FROM utilization_stats WHERE mean_util IS NOT NULL"
+
+    def _absorb(comp: str, score: Optional[float]) -> None:
+        if score is None:
+            return
+        score = min(1.0, max(0.0, float(score)))
+        out[comp] = max(out.get(comp, 0.0), score)
+
+    for comp, signal, mean, peak, mean_util in conn.execute(
+        "SELECT component, signal, mean, peak, mean_util FROM utilization_stats "
+        "WHERE mean IS NOT NULL"
     ):
-        out[str(comp)] = max(out.get(comp, 0.0), float(mean_util))
+        if mean_util is not None:
+            _absorb(str(comp), mean_util)
+        elif signal in OCCUPANCY_SIGNALS and peak is not None and peak > 0:
+            _absorb(str(comp), float(mean) / float(peak))
     return out

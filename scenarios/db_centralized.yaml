@@ -1,0 +1,37 @@
+# db_centralized.yaml - DBEndpoint scenario, centralized topology:
+# one colocated compute+storage node, no internal network stages.
+# Stub callers (tests / ticket-08 agents) submit into db.queries.
+
+sim:
+  until: 100.0
+  seed: 0
+
+db:
+  topology: centralized
+  compute_nodes: 1
+  storage_nodes: 1
+  compute:
+    slots: 2
+    ingress: fifo
+    issue_ratio: 0.1
+    phase_split: three_phase
+  storage:
+    backend: nvme
+  # network section unused by centralized (kept for cross-scenario parity)
+  network:
+    latency: 0.001
+    bandwidth: 1000.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.1
+
+profiles:
+  scale_out_compute:   # N grows; per-node params untouched (centralized: N must stay 1)
+    db:
+      compute_nodes: 1
+  stress:
+    sim:
+      until: 200.0
+    db:
+      compute:
+        slots: 4

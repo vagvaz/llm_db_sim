@@ -1,0 +1,34 @@
+# db_distributed.yaml - DBEndpoint scenario, distributed topology:
+# colocated compute+local-storage node pairs; coordinators front peer
+# queries (round-robined) over dedicated per-peer links, with the
+# coordinator_overhead multiplier on coordinator compute.
+
+sim:
+  until: 100.0
+  seed: 0
+
+db:
+  topology: distributed
+  compute_nodes: 4      # node pairs (2 coordinators + 2 peers)
+  coordinators: 2
+  compute:
+    slots: 2
+    ingress: fifo
+    issue_ratio: 0.1
+    phase_split: three_phase
+  storage:
+    backend: nvme
+  network:
+    latency: 0.001
+    bandwidth: 1000.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.1
+
+profiles:
+  scale_out_compute:
+    db:
+      compute_nodes: 6    # more coordinators + peers, params untouched
+  single_coordinator:
+    db:
+      coordinators: 1

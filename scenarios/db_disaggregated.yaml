@@ -1,0 +1,33 @@
+# db_disaggregated.yaml - DBEndpoint scenario, disaggregated topology:
+# N compute nodes x M storage nodes over ONE shared storage-network
+# segment; scale-out == grow N or M (per-node params untouched).
+
+sim:
+  until: 100.0
+  seed: 0
+
+db:
+  topology: disaggregated
+  compute_nodes: 2      # N
+  storage_nodes: 2      # M
+  compute:
+    slots: 2
+    ingress: fifo
+    issue_ratio: 0.1
+    phase_split: three_phase
+  storage:
+    backend: nvme
+  network:
+    latency: 0.001
+    bandwidth: 1000.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.1   # unused on disaggregated
+
+profiles:
+  scale_out_compute:
+    db:
+      compute_nodes: 4    # N: 2 -> 4
+  scale_out_storage:
+    db:
+      storage_nodes: 4    # M: 2 -> 4

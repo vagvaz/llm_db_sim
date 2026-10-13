@@ -110,8 +110,10 @@ def test_ingress_registry_maps_names_to_classes() -> None:
         }[kind]
 
 
-def test_build_model_is_a_skeleton() -> None:
-    with pytest.raises(NotImplementedError, match="tickets 08-10"):
+def test_build_model_requires_db_section() -> None:
+    # ticket 10 filled the build_model stub: the DB portion wires from the
+    # 'db:' config namespace; anything without it fails fast
+    with pytest.raises(RegistryError, match="requires a 'db:'"):
         build_model({"anything": "goes"})
 
 

@@ -1,6 +1,9 @@
-/* agent_db_sim analyzer — math core (browser + node dual-use) */
+/* agent_db_sim analyzer — math core v2 (browser + node dual-use).
+   Generalized: chain of K M/G/c service stations (+ optional IS think node),
+   closed loop of N agents visiting every station once per cycle. */
 /*MATHCORE-START*/
 'use strict';
+/*MATHCORE-START*/
 
 /* ---------- RNG & samplers ---------- */
 function mulberry32(seed){
@@ -12,7 +15,7 @@ function mulberry32(seed){
     return ((t^(t>>>14))>>>0)/4294967296;
   };
 }
-/* Gamma(k, scale 1): Marsaglia–Tsang for k>=1, Stug trick (G(k)=G(k+1)*U^(1/k)) for k<1 */
+/* Gamma(k, scale 1): Marsaglia–Tsang k>=1, Stug trick k<1 */
 function gamma1(rng, k){
   if(k<1) return gamma1(rng, k+1)*Math.pow(Math.max(rng(),1e-16), 1/k);
   const d=k-1/3, c=1/Math.sqrt(9*d);
@@ -30,7 +33,7 @@ function gamma1(rng, k){
     if(Math.log(u) < 0.5*x*x + d*(1 - v + Math.log(v))) return d*v;
   }
 }
-/* service-time sampler with mean tau, SCV scv (Var/mean²) */
+/* service-time sampler with mean tau, SCV scv */
 function makeSampler(tau, scv, rng){
   if(scv<0.02) return ()=>tau;
   const k=1/scv, theta=tau*scv;
@@ -38,25 +41,23 @@ function makeSampler(tau, scv, rng){
   return ()=> gamma1(rng,k)*theta;
 }
 
-/* ---------- Erlang C (M/M/c) ---------- */
+/* ---------- Erlang C ---------- */
 function erlangB(c, a){ let b=1; for(let k=1;k<=c;k++) b = a*b/(k + a*b); return b; }
 function erlangC(c, a){ const b=erlangB(c,a); return b/(1-(a/c)*(1-b)); }
 function logfact(k){ let s=0; for(let i=2;i<=k;i++) s+=Math.log(i); return s; }
 
-/* ---------- product-form weights (log-space to avoid overflow) ---------- */
-/* M/M(c) station weight: f(n) = τ^n/n! (n≤c), τ^c/c!·(τ/c)^(n−c) (n>c) */
+/* ---------- product-form weights (log space) ---------- */
 function mmcfLog(c, tau, nMax){
   const lf=new Array(nMax+1); lf[0]=0;
   const lt=Math.log(tau);
   let cur=0;
   for(let n=1;n<=nMax;n++){
-    if(n<=c)     cur = n*lt - logfact(n);
-  else         cur = lf[n-1] + (lt - Math.log(c));   /* keeps (τ/c) factor at n=c+1 too */
+    if(n<=c) cur = n*lt - logfact(n);
+    else     cur = lf[n-1] + (lt - Math.log(c));
     lf[n]=cur;
   }
   return lf;
 }
-/* infinite-server (think) node weight: f(n)= τ^n / n! */
 function isfLog(tau, nMax){
   const lf=new Array(nMax+1); lf[0]=0;
   const lt=Math.log(tau);
@@ -79,85 +80,112 @@ function convArr(a,b,nMax){
   return g;
 }
 
-/* Exact closed chain (Gordon–Newell/Buzen): [think IS if τt>0] ⊛ LLM M/M/cL ⊛ DB M/M/cD */
-function solveClosedChain(P){
-  const N=Math.round(P.N), cL=Math.round(P.cLLM), cD=Math.round(P.cDB);
-  const tauL=P.tauLLM, tauD=P.tauDB, tauT=Math.max(0,P.tauThink);
-  const f1=normExp(mmcfLog(cL,tauL,N));
-  const f2=normExp(mmcfLog(cD,tauD,N));
-  const muL=n=>Math.min(n,cL)/tauL, muD=n=>Math.min(n,cD)/tauD;
-
-  let GN, piL, piD;
-  if(tauT>0){
-    const f0=normExp(isfLog(tauT,N));
-    const restL=convArr(f0,f2,N);
-    GN=convArr(restL,f1,N)[N];
-    if(!(GN>0)) return {ok:false};
-    piL=n=>f1[n]*restL[N-n]/GN;
-    const restD=convArr(f0,f1,N);
-    piD=n=>f2[n]*restD[N-n]/GN;
-  } else {
-    const G=convArr(f1,f2,N);
-    GN=G[N];
-    if(!(GN>0)) return {ok:false};
-    piL=n=>f1[n]*f2[N-n]/GN;
-    piD=n=>f2[n]*f1[N-n]/GN;
+/* ---------- station config ----------
+   P.stations = [{name,tau,c,scv}, ...]  (K ≥ 1), or legacy fields
+   {tauLLM,cLLM,csLLM,tauDB,cDB,csDB} mapped to [LLM, DB]. */
+function deriveStations(P){
+  if(Array.isArray(P.stations) && P.stations.length>0){
+    return P.stations.map((s,i)=>({
+      name:String(s.name||('st'+(i+1))),
+      tau:  Math.max(1e-6, +s.tau||1e-6),
+      c:    Math.max(1, Math.round(+s.c||1)),
+      scv:  Math.max(0, +s.scv||0)
+    }));
   }
-  let LL=0,XL=0,LD=0,XD=0;
-  for(let n=1;n<=N;n++){
-    const pL=piL(n); LL+=n*pL; XL+=muL(n)*pL;
-    const pD=piD(n); LD+=n*pD; XD+=muD(n)*pD;
-  }
-  const X=(XL+XD)/2;
-  return {ok:true, X, LL, LD, LT:Math.max(0,N-LL-LD), rhoL:X*tauL/cL, rhoD:X*tauD/cD, N};
+  return [
+    {name:'LLM', tau:Math.max(1e-3,+P.tauLLM||1e-3), c:Math.max(1,Math.round(+P.cLLM||1)), scv:Math.max(0,+P.csLLM||0)},
+    {name:'DB',  tau:Math.max(1e-3,+P.tauDB ||1e-3), c:Math.max(1,Math.round(+P.cDB ||1)), scv:Math.max(0,+P.csDB ||0)}
+  ];
 }
 
-/* Full analytic solve: exact chain (SCV=1) + Allen–Cunneen SCV inflation + calibrated
-   per-station wait mixtures {pi:P(wait>0), mu:exp tail rate}. */
-function solve(P){
-  const s=solveClosedChain(P);
-  if(!s.ok) return s;
-  const cL=Math.round(P.cLLM), cD=Math.round(P.cDB);
-  const corrL=(1+P.csLLM)/2, corrD=(1+P.csDB)/2;
-  const RL=s.LL/s.X, RD=s.LD/s.X;
-  const WLq=Math.max(0,RL-P.tauLLM)*corrL;
-  const WDq=Math.max(0,RD-P.tauDB)*corrD;
-  const cal=(tau,c,X,Wq)=>{
-    /* closed-chain calibration: a waiting agent sees all c servers busy, so the
-       wait tail is Exp(c/τ) (validated empirically vs MC bake-off); π̂ rescaled
-       so the mixture mean still equals the exact chain mean wait. */
-    let mu=c/tau, pi;
-    if(mu<=1e-12){ pi=1; mu=Wq>0?1/Wq:1e6; }
-    else{
-      pi=mu*Wq;
-      if(pi>=1){ pi=1; mu=1/Math.max(Wq,1e-12); }
+/* Exact closed chain (Gordon–Newell/Buzen) over arbitrary station chains.
+   Produces per-station marginals via prefix/suffix convolutions (O(K·N²)). */
+function solveChain(N, tauThink, stations){
+  const fs=[];
+  const hasThink = tauThink>1e-9;
+  if(hasThink) fs.push(normExp(isfLog(tauThink,N)));
+  const svcIdx = stations.map((st,k)=>{ fs.push(normExp(mmcfLog(st.c, st.tau, N))); return (hasThink? k+1 : k); });
+  const Kt=fs.length;
+  const unit=new Array(N+1).fill(0); unit[0]=1;
+  const pref=[unit];
+  for(let k=1;k<=Kt;k++) pref.push(convArr(pref[k-1], fs[k-1], N));
+  const suf=new Array(Kt+1); suf[Kt]=unit;
+  for(let k=Kt-1;k>=0;k--) suf[k]=convArr(fs[k], suf[k+1], N);
+  const GN=pref[Kt][N];
+  if(!(GN>0)) return {ok:false};
+
+  const st=stations.map((sd,k)=>{
+    const idx=svcIdx[k];
+    const rest=convArr(pref[idx], suf[idx+1], N);
+    let L=0, Xs=0;
+    for(let n=1;n<=N;n++){
+      const p=fs[idx][n]*rest[N-n]/GN;
+      L+=n*p;
+      Xs+=Math.min(n,sd.c)/sd.tau*p;
     }
-    return {mu,pi};
-  };
-  const wL=cal(P.tauLLM,cL,s.X,WLq);
-  const wD=cal(P.tauDB,cD,s.X,WDq);
-  return Object.assign(s,{RL,RD,WLq,WDq,corrL,corrD,wL,wD,T:P.tauThink+RL+RD,
-                          saturated:(s.rhoL>=0.9995||s.rhoD>=0.9995)});
+    return {name:sd.name, tau:sd.tau, c:sd.c, scv:sd.scv, L, Xs};
+  });
+  const X=st.reduce((a,s)=>a+s.Xs,0)/st.length;   // flow balance: all Xs equal (exact)
+  const Lsum=st.reduce((a,s)=>a+s.L,0);
+  st.forEach(s=>{ s.rho=X*s.tau/s.c; s.R=s.L/X; });
+  return {ok:true, X, st, LT:Math.max(0,N-Lsum), N};
 }
 
-/* Latency distribution (per-bin masses on a uniform grid):
-   latency = T0(τL+τD) + ExpThink ⊛ WaitMixLLM ⊛ WaitMixDB */
+/* Full solve: exact chain (SCV=1) + Allen–Cunneen SCV inflation + calibrated
+   per-station wait mixtures {pi:P(wait>0), mu:Exp tail rate, mean matched}. */
+function solve(P){
+  const stations=deriveStations(P);
+  const core=solveChain(Math.round(P.N), Math.max(0,P.tauThink||0), stations);
+  if(!core.ok) return core;
+  const X=core.X;
+  core.st.forEach(s=>{
+    s.corr=(1+s.scv)/2;
+    s.Wq=Math.max(0,s.R-s.tau)*s.corr;
+    s.Lq=X*s.Wq;
+    /* closed-chain calibration: waiting agent sees all c servers busy → tail Exp(c/τ);
+       π̂ = μ̂·W (clamped) rescales to keep the mixture mean = exact chain mean wait */
+    let mu=s.tau>0? s.c/s.tau : 1, pi;
+    if(mu<=1e-12){ pi=1; mu=s.Wq>0?1/s.Wq:1e6; }
+    else{
+      pi=mu*s.Wq;
+      if(pi>=1){ pi=1; mu=1/Math.max(s.Wq,1e-12); }
+    }
+    s.mix={mu,pi};
+  });
+  const T=(P.tauThink||0)+core.st.reduce((a,s)=>a+s.R,0);
+  const saturated=core.st.every(s=>s.rho>=0.9995);
+  /* legacy aliases for the two-endpoint topology [LLM, DB] */
+  const out=Object.assign(core,{stations, T, saturated, satMax:Math.max.apply(null,core.st.map(s=>s.rho))});
+  if(core.st.length===2){
+    const a=core.st[0], b=core.st[1];
+    out.LL=a.L; out.LD=b.L;
+    out.RL=a.R; out.RD=b.R;
+    out.rhoL=a.rho; out.rhoD=b.rho;
+    out.WLq=a.Wq; out.WDq=b.Wq;
+    out.corrL=a.corr; out.corrD=b.corr;
+    out.wL=a.mix; out.wD=b.mix;
+  }
+  return out;
+}
+
+/* Latency distribution (per-bin masses): latency = T0(Σ τ) + ExpThink ⊛ mix_0 ⊛ … ⊛ mix_{K−1} */
 function latencyDistribution(P, sol, gridN, horizonMult){
-  const meanLat=P.tauThink+sol.RL+sol.RD;
+  const meanLat=(P.tauThink||0)+sol.st.reduce((a,s)=>a+s.R,0);
   const horizon=horizonMult*Math.max(meanLat,1e-6);
   const dx=horizon/(gridN-1);
-  const T0=P.tauLLM+P.tauDB;
+  const T0=sol.st.reduce((a,s)=>a+s.tau,0);
   const dEx=m=>1-Math.exp(-m*dx);
-  const fT=new Float64Array(gridN);
+  let f;
   if(P.tauThink>1e-9){
     const rT=1/P.tauThink;
-    for(let i=0;i<gridN;i++) fT[i]=Math.exp(-rT*i*dx)*dEx(rT);
-  } else fT[0]=1;
+    f=new Float64Array(gridN);
+    for(let i=0;i<gridN;i++) f[i]=Math.exp(-rT*i*dx)*dEx(rT);
+  } else { f=new Float64Array(gridN); f[0]=1; }
   const mkWait=w=>{
-    const f=new Float64Array(gridN);
-    f[0]=(1-w.pi)+w.pi*dEx(w.mu);                      // no-wait delta + [0,dx) tail mass
-    for(let i=1;i<gridN;i++) f[i]=w.pi*Math.exp(-w.mu*i*dx)*dEx(w.mu);
-    return f;
+    const g=new Float64Array(gridN);
+    g[0]=(1-w.pi)+w.pi*dEx(w.mu);
+    for(let i=1;i<gridN;i++) g[i]=w.pi*Math.exp(-w.mu*i*dx)*dEx(w.mu);
+    return g;
   };
   const convF=(a,b)=>{
     const n=a.length, out=new Float64Array(n);
@@ -167,8 +195,7 @@ function latencyDistribution(P, sol, gridN, horizonMult){
     }
     return out;
   };
-  let f=convF(mkWait(sol.wL),mkWait(sol.wD));
-  f=convF(fT,f);
+  for(const s of sol.st) f=convF(f,mkWait(s.mix));
   const cdf=new Float64Array(gridN);
   let acc=0;
   for(let i=0;i<gridN;i++){ acc+=f[i]; cdf[i]=acc; }
@@ -178,7 +205,7 @@ function latencyDistribution(P, sol, gridN, horizonMult){
     if(cdf[gridN-1]<tg) return Infinity;
     let lo=0,hi=gridN-1;
     while(lo<hi){ const mid=(lo+hi)>>1; if(cdf[mid]<tg) lo=mid+1; else hi=mid; }
-    if(lo===0) return (tg/cdf[0])*dx + T0;            // percentile inside first bin
+    if(lo===0) return (tg/cdf[0])*dx + T0;
     const i=Math.max(1,lo), c0=cdf[i-1], c1=cdf[i];
     return ((i-1)+((c1>c0)?(tg-c0)/(c1-c0):0))*dx + T0;
   };
@@ -190,87 +217,86 @@ function latencyDistribution(P, sol, gridN, horizonMult){
           f:Array.from(f), cdf, M, dx, horizon, gridN, T0};
 }
 
-/* ---------- Monte Carlo: FCFS discrete-event simulation of the closed loop ---------- */
-/* Correct M/G/c semantics with FIFO queues; agents as a state machine. */
+/* ---------- Monte Carlo: exact FCFS event simulation over the station chain ---------- */
 function mcSim(P, nKeep, warmFrac, seed){
-  const N=Math.round(P.N), cL=Math.round(P.cLLM), cD=Math.round(P.cDB);
+  const N=Math.round(P.N);
+  const stations=deriveStations(P), K=stations.length;
   const nTotal=Math.max(Math.round(nKeep/(1-Math.min(warmFrac,0.9))),nKeep);
   const skip=nTotal-nKeep;
   const rng=mulberry32(seed>>>0);
-  const sT=makeSampler(Math.max(P.tauThink,0),1,rng);
-  const sL=makeSampler(P.tauLLM,P.csLLM,rng);
-  const sD=makeSampler(P.tauDB,P.csDB,rng);
+  const sT=makeSampler(Math.max(P.tauThink||0,0),1,rng);
+  const samplers=stations.map(s=>makeSampler(s.tau,s.scv,rng));
 
-  /* agent phases: 0 think,1 in LLQ,2 LLM busy,3 in DBQ,4 DB busy */
-  const phase=new Int8Array(N);
+  /* phase: −1 thinking · p=0..K−1 at station p (queued if wake=∞, in service otherwise) */
+  const phase=new Int8Array(N).fill(-1);
   const wake=new Float64Array(N);
-  const dT=new Float64Array(N);
-  const arrL=new Float64Array(N), arrD=new Float64Array(N);
-  const wLat=new Float64Array(N), wDat=new Float64Array(N), sojL=new Float64Array(N);
-  for(let i=0;i<N;i++){ phase[i]=0; wake[i]=sT(); }   // initial think from t=0
+  const dT=new Float64Array(N), sojSum=new Float64Array(N);
+  const arr=new Float64Array(N*K), wq=new Float64Array(N*K);
+  for(let i=0;i<N;i++){ phase[i]=-1; wake[i]=sT(); dT[i]=wake[i]; }  // initial think; dT stored (approx from 0)
 
-  const qL=[], qD=[];
-  let busyL=0, busyD=0, busyClkL=0, busyClkD=0;
-  let now=0, completed=0, kept=0, lastComp=0;
-  let firstCycleStart=Infinity, firstComp=Infinity;
-  const latA=new Float64Array(nKeep), wLA=new Float64Array(nKeep), wDA=new Float64Array(nKeep);
-  let guard=0, maxIter=nTotal*6+20000;
+  const qs=[]; for(let k=0;k<K;k++) qs.push([]);
+  let busy=[], busyClk=[]; for(let k=0;k<K;k++){ busy.push(0); busyClk.push(0); }
+  let now=0, completed=0, kept=0, firstComp=Infinity, lastComp=0;
+  const latA=new Float64Array(nKeep);
+  const wqA=[]; for(let k=0;k<K;k++) wqA.push(new Float64Array(nKeep));
+  let guard=0, maxIter=nTotal*(K+1)*4+20000;
+  void firstComp;
 
-  const dispatchL=()=>{
-    while(busyL<cL && qL.length){
-      const a=qL.shift();
-      wLat[a]=now-arrL[a];
-      const s=sL();
-      busyL++; busyClkL+=s;
-      phase[a]=2; wake[a]=now+s;
-    }
-  };
-  const dispatchD=()=>{
-    while(busyD<cD && qD.length){
-      const a=qD.shift();
-      wDat[a]=now-arrD[a];
-      const s=sD();
-      busyD++; busyClkD+=s;
-      phase[a]=4; wake[a]=now+s;
+  const dispatch=k=>{
+    const c=stations[k].c;
+    while(busy[k]<c && qs[k].length){
+      const a=qs[k].shift();
+      wq[a*K+k]=now-arr[a*K+k];
+      const s=samplers[k]();
+      busy[k]++; busyClk[k]+=s;
+      wake[a]=now+s;
     }
   };
 
   while(kept<nKeep){
     if(guard++>maxIter) return {ok:false};
     let a=-1;
-    for(let i=0;i<N;i++)
-      if((phase[i]===0||phase[i]===2||phase[i]===4)&&(a<0||wake[i]<wake[a])) a=i;
+    for(let i=0;i<N;i++){
+      if(phase[i]===-1 || (phase[i]>=0 && isFinite(wake[i]))){
+        if(a<0 || wake[i]<wake[a]) a=i;
+      }
+    }
     if(a<0) break;
     now=wake[a];
     const ph=phase[a];
-    if(ph===0){                       // think done → enter LLM queue
-      arrL[a]=now; phase[a]=1; wake[a]=Infinity;
-      qL.push(a); dispatchL();
-    } else if(ph===2){                // LLM done → dispatch LLM → enter DB queue
-      busyL--; sojL[a]=now-arrL[a]; dispatchL();
-      arrD[a]=now; phase[a]=3; wake[a]=Infinity;
-      qD.push(a); dispatchD();
-    } else {                          // DB done → record cycle → think again
-      busyD--; dispatchD();
-      completed++;
-      if(completed>skip){
-        wLA[kept]=wLat[a]; wDA[kept]=wDat[a];
-        latA[kept]=dT[a]+sojL[a]+(now-arrD[a]);
-        if(kept===0){ firstComp=now; firstCycleStart=arrL[a]-dT[a]; }
-        lastComp=now;
-        kept++;
+    if(ph===-1){               /* think done → station 0 */
+      arr[a*K]=now; phase[a]=0; wake[a]=Infinity;
+      qs[0].push(a); dispatch(0);
+    } else {                   /* service done at station ph */
+      busy[ph]--; dispatch(ph);
+      sojSum[a]+=now-arr[a*K+ph];
+      if(ph<K-1){
+        arr[a*K+ph+1]=now; phase[a]=ph+1; wake[a]=Infinity;
+        qs[ph+1].push(a); dispatch(ph+1);
+      } else {
+        /* completed cycle */
+        completed++;
+        if(completed>skip){
+          for(let k=0;k<K;k++) wqA[k][kept]=wq[a*K+k];
+          latA[kept]=dT[a]+sojSum[a];
+          if(kept===0) firstComp=now;
+          lastComp=now;
+          kept++;
+        }
+        const s=sT(); dT[a]=s; sojSum[a]=0;
+        phase[a]=-1; wake[a]=now+s;
       }
-      const s=sT(); dT[a]=s; phase[a]=0; wake[a]=now+s;
     }
   }
   if(kept<nKeep) return {ok:false};
-  return {ok:true, lat:latA, wl:wLA, wd:wDA, kept:kept,
-          X:(kept-1)/Math.max(1e-9,(lastComp-firstComp)),
-          rhoL:busyClkL/(cL*lastComp), rhoD:busyClkD/(cD*lastComp),
-          window:(lastComp-firstCycleStart)};
+  const K0=Math.max(1e-9,lastComp-firstComp);
+  const rho=busyClk.map((b,k)=>b/(stations[k].c*lastComp));
+  const out={ok:true, lat:latA, wq:wqA, kept, X:(kept-1)/K0, rho, K, stations};
+  /* means per station from kept samples */
+  out.wqMean=wqA.map(w=>{ let s=0; for(const v of w) s+=v; return s/kept; });
+  if(K===2){ out.wl=out.wq[0]; out.wd=out.wq[1]; }
+  return out;
 }
-
-/* percentile helper on a Float64Array (sorted copy) */
 function mcStats(arr){
   const n=arr.length, s=Float64Array.from(arr).sort();
   const q=p=>{
@@ -286,5 +312,6 @@ function mcStats(arr){
 /* node export guard (browser ignores this) */
 if(typeof module!=='undefined' && module.exports){
   module.exports={mulberry32,gamma1,makeSampler,erlangB,erlangC,logfact,mmcfLog,isfLog,
-    normExp,convArr,solveClosedChain,solve,latencyDistribution,mcSim,mcStats};
+    normExp,convArr,deriveStations,solveChain,solveChain:solveChain,solve,latencyDistribution,mcSim,mcStats,erlangC};
 }
+/*MATHCORE-END*/

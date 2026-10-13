@@ -29,3 +29,9 @@ Chronological log of orchestration decisions and stage completions. Tickets hold
 **09 task (resolved).** LLMEndpoint: two-phase input/output token service on SlotServer; slots + fair-shared aggregate token/s cap; submit/wait/response_of API; lifecycle edges + counters/occupancy probes. 16 tests green. fix-4.
 
 **11 task (resolved).** Metrics collector: batched SQLite TraceWriter (bounded buffer, indexes at finalize); derived percentile/utilization/token-rate/hybrid-attribution tables at collect_run(); warm-up + sample_interval config; component-level stage fallback for split hops. 13 tests green (59 slice tests green post-landing). fix-6.
+
+**10 task (resolved).** DBEndpoint: components/db/ tree — three topologies, per-link/segment/none networks, StorageBackend presets (hdd/ssd/nvme) with ceilings, PhaseSlotServer (compute slot held through storage round-trip; flagged: base SlotServer cost_fn can't express wrapped hops), coordinators + overhead multiplier, scale-out N/M. Two flagged findings: (1) simpy Container fp-precision wedge on 0.01 transfers — DB-local tolerant container subclass, noted for simkit fix; (2) PhaseSlotServer subclasses SlotServer overriding _serve only. 20 tests; full suite 101 green. fix-5.
+
+**Stage 1 complete (components).** Tickets 08–11 all landed, committed (`296a2b1`, `0ccb9d1`, `08686e7`, `a4335b0`), map indexed, suite 101 green. Loop attempt 1 successful.
+
+**Stage 2 dispatched (viz stack).** Ticket 12 → fix-6 (reused): VCD writer + FastAPI/SSE/d3-wave live server + Jinja2/Plotly reports on fixtures; integration with build_model (agent/LLM stub wiring) deferred to ticket 13.

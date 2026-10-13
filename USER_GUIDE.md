@@ -336,7 +336,9 @@ Renders any indexed template to a standalone HTML file (vendored
 `plotly.min.js` is copied next to the output). With `--name <template>`,
 any report template under `viz/templates/` works; default output is
 `<run-dir>/<name>.html`. `run` already emits `report.html`, so `render` is
-mainly useful for other templates or CI artifacts.
+mainly useful for other templates or CI artifacts. Sweep mode: add
+`--sweep <sweep-dir>` to render a sweep-comparison report over a sweep root
+(defaults to `--name sweep_compare`; see §8.5).
 
 ---
 
@@ -551,9 +553,8 @@ Reports are plain Jinja2 files dropped into `src/agent_db_sim/viz/templates/`
   template works both served and standalone;
 - `template_name`.
 
-Copy `standard.html` as a starting point; it extends `base.html` and shows
-tables + `Plotly.newPlot("…", {{ figures[...] | safe }}, {responsive: true})`
-usage.
+Copy an existing plain template as a starting point; see §8.5 for the
+preferred blocks-file way of composing report content.
 
 ### 8.4 Adding signals
 
@@ -572,6 +573,87 @@ table and the VCD catalog, so:
    `counter` samples for utilization and token-rate derivation
    (`derive_utilization` turns `level` samples into step functions, and
    `counter` samples whose names contain `token` into throughput rates).
+
+### 8.5 Composable reports
+
+A report does not have to be one hard-coded template file. Any report can be
+a **block list**: an ordered list of named sections declared in a small YAML
+file next to the built-in template scaffolds, `<name>.blocks.yaml` in
+`src/agent_db_sim/viz/templates/`. Add, remove, or reorder blocks by editing
+that file — no code. The built-in `standard` report is blocks-driven with the
+same sections as before (`standard.blocks.yaml`), and `sweep_compare`
+renders a whole sweep (`runs/<sweep>/`) instead of a single run.
+
+**Block types** (a block is a YAML mapping with a mandatory `type`, optional
+`title` / `name` (stable section id) / `inline` (glue under the previous
+section instead of starting a new one), plus per-type parameters):
+
+| type (scope) | what it renders | parameters |
+|---|---|---|
+| `metadata` (run) | run metadata key/value table | `fields` (list of meta keys; default `t_end`, `warmup_end`, VCD stats) |
+| `metric_table` (run) | a derived table | `table` = `latency_percentiles` \| `utilization_stats` \| `bottleneck`; `filter` (e.g. `{source: e2e, kind: latency}`); optional `columns` |
+| `plot_series` (run) | Plotly time series | `series` = `utilization` (of `utilization_series`) \| `tokens` (of `token_rate_series`) |
+| `plot_percentiles` (run) | grouped per-stage p50/p95/p99 bars | `div` |
+| `plot_bottleneck` (run) | hybrid bottleneck attribution bars | `div` |
+| `plot_distribution` (run) | latency histogram from `trace` | `source` = `e2e` (default) or a component name |
+| `markdown` (both) | prose | `text` (headings, bullets, bold, inline code) |
+| `run_table` (sweep) | per-run factors + e2e percentiles + bottleneck winner | — |
+| `factor_group_plot` (sweep) | e2e metric colored/grouped by one factor | `metric` = `p50`\|`p95`\|`p99`; `factor` (default: the first factor that distinguishes the runs) |
+| `factor_delta` (sweep) | paired deltas between runs equal on every other factor | `metric`; `factor` |
+
+Example — a run report (`src/agent_db_sim/viz/templates/standard.blocks.yaml`):
+
+```yaml
+blocks:
+  - type: metadata
+    title: Run metadata
+  - type: plot_percentiles
+    title: "Latency percentiles (per stage)"
+    div: fig-latency-percentiles
+  - type: metric_table
+    table: latency_percentiles
+    inline: true          # table under the previous figure's section
+  - type: plot_series
+    series: utilization
+    title: "Utilization (slots / token rate)"
+    div: fig-utilization
+  - type: plot_series
+    series: tokens
+    div: fig-token-rate
+    inline: true
+  - type: metric_table
+    table: utilization_stats
+    inline: true
+  - type: plot_bottleneck
+    title: "Bottleneck attribution (hybrid: queue share 70% + saturation 30%)"
+    div: fig-bottleneck
+```
+
+Drop the same shape into any `myreport.blocks.yaml` and it is auto-indexed
+like every template (§8.3) at `GET /reports`.
+
+**Sweep / multi-run analysis.** `sweep_compare.blocks.yaml` declares the
+sweep block types `run_table`, `factor_group_plot`, and `factor_delta`; they
+read `sweep_summary.json` plus each run's `metrics.db` under the sweep root
+(a run missing from the summary is picked up from its `metrics.db` /
+`config.yaml` instead). Render over a sweep (`runs/<sweep>/`):
+
+```bash
+# viz server, served against any sibling run dir
+uv run agent-db-sim serve runs/topology_compare
+#   GET /sweeps                      -> list of sweep roots under runs/
+#   GET /sweeps/topology-sweep/      -> sweep_compare over runs/topology-sweep
+#   GET /sweeps/topology-sweep/reports/sweep_compare
+
+# CI-friendly standalone HTML (defaults to --name sweep_compare in sweep mode)
+uv run agent-db-sim render runs/topology_compare --sweep runs/topology-sweep
+# report 'sweep_compare' -> runs/topology-sweep/sweep_compare.html
+```
+
+`factor_delta` is for paired questions like *does scale-out relieve the
+bottleneck?*: it groups runs that agree on every factor except the chosen
+one and reports `Δ metric = other − base` per group (the `sweep_summary.json`
+`comparison` table is still available alongside if you want raw numbers).
 
 ---
 

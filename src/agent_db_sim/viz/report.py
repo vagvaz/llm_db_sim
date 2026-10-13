@@ -29,6 +29,7 @@ __all__ = [
     "run_metadata",
     "build_figures",
     "render_report",
+    "render_sweep_report",
     "render_reports_index",
     "PLOTTY_SRC",
 ]
@@ -43,7 +44,7 @@ static_dir = PACKAGE_DIR / "static"
 PLOTTY_SRC = "plotly.min.js"
 PLOTTY_SRC_SERVER = "/static/plotly.min.js"
 
-_SCAFFOLDS = ("base.html", "reports.html", "wave.html")
+_SCAFFOLDS = ("base.html", "reports.html", "wave.html", "blocks.html")
 
 
 # --------------------------------------------------------------------- #
@@ -51,12 +52,28 @@ _SCAFFOLDS = ("base.html", "reports.html", "wave.html")
 # --------------------------------------------------------------------- #
 
 def list_templates() -> List[Dict[str, str]]:
-    """Auto-index report templates."""
+    """Auto-index report templates.
+
+    Two flavors, both indexed:
+
+    - blocks-driven: a ``<name>.blocks.yaml`` block list (stage-6 composable
+      reports; rendered through the ``blocks.html`` scaffold);
+    - plain Jinja2: a hand-written ``<name>.html`` file.
+    """
     entries: List[Dict[str, str]] = []
+    seen: set = set()
+    for path in sorted(templates_dir.glob("*.blocks.yaml")):
+        name = path.name[: -len(".blocks.yaml")]
+        if name.startswith("_"):
+            continue
+        entries.append({"name": name, "file": path.name, "mode": "blocks"})
+        seen.add(name)
     for path in sorted(templates_dir.glob("*.html")):
         if path.name.startswith("_") or path.name in _SCAFFOLDS:
             continue
-        entries.append({"name": path.stem, "file": path.name})
+        if path.stem in seen:  # a blocks file drives an html twin's content
+            continue
+        entries.append({"name": path.stem, "file": path.name, "mode": "html"})
     return entries
 
 
@@ -294,9 +311,24 @@ def render_report(
 
     ``standalone=True`` ships a relative plotly.min.js reference (CLI
     ``render``); server mode serves ``/static/plotly.min.js``.
+
+    If a ``<name>.blocks.yaml`` block list exists next to the templates, the
+    report is block-driven (stage-6): the ordered block list produces the
+    sections (see ``viz/blocks.py``) rendered through the ``blocks.html``
+    scaffold. Otherwise the plain ``<name>.html`` Jinja2 template renders
+    exactly as before.
     """
-    if not (templates_dir / f"{name}.html").exists():
+    from agent_db_sim.viz.blocks import compose_run_report, load_blocks
+
+    blocks = load_blocks(name)
+    if blocks is None and not (templates_dir / f"{name}.html").exists():
         raise FileNotFoundError(f"no report template {name!r} in {templates_dir}")
+    if blocks is not None:
+        return compose_run_report(
+            blocks, run_dir, name=name, standalone=standalone,
+            extra_context=extra_context,
+        )
+
     db_path = Path(run_dir) / "metrics.db"
     if not db_path.exists():
         raise FileNotFoundError(f"no metrics.db under {run_dir}")
@@ -314,6 +346,27 @@ def render_report(
     if extra_context:
         ctx.update(extra_context)
     return jinja_env().get_template(f"{name}.html").render(**ctx)
+
+
+def render_sweep_report(
+    sweep_dir: Any,
+    name: str = "sweep_compare",
+    standalone: bool = False,
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Render a sweep-comparison report (e.g. ``sweep_compare``) over a
+    sweep root directory containing ``sweep_summary.json`` and per-run
+    ``metrics.db`` files (see ``viz/blocks.py::load_sweep``)."""
+    from agent_db_sim.viz.blocks import compose_sweep_report, load_blocks
+
+    has_html = (templates_dir / f"{name}.html").exists()
+    blocks = load_blocks(name)
+    if not has_html and blocks is None:
+        raise FileNotFoundError(f"no report template {name!r} in {templates_dir}")
+    return compose_sweep_report(
+        blocks or [], sweep_dir, name=name, standalone=standalone,
+        extra_context=extra_context,
+    )
 
 
 def render_reports_index(run_dir: Any) -> str:

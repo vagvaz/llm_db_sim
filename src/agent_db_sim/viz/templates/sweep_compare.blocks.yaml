@@ -1,0 +1,18 @@
+# Composable 'sweep_compare' report (stage-6, lane B).
+#
+# Renders over a sweep root (sweep_summary.json + each run's metrics.db):
+#   GET /sweeps/<name>/reports/sweep_compare   (viz server)
+#   agent-db-sim render <any-dir> --sweep <sweep-dir>
+# `metric:` is one of p50/p95/p99; `factor:` omitted = the sweep's first
+# factor (adaptive to any sweep). Edit this list to reshape the report.
+blocks:
+  - type: run_table
+    title: "Sweep runs — factors, e2e percentiles, bottleneck winner"
+
+  - type: factor_group_plot
+    title: "e2e p95 grouped by factor"
+    metric: p95
+
+  - type: factor_delta
+    title: "Paired deltas — same factors except one (other − base)"
+    metric: p95

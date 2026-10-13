@@ -7,16 +7,18 @@ with ``run.vcd`` + ``metrics.db`` via the one-shot writer and the collector.
 
 from __future__ import annotations
 
+import json
 import random
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from agent_db_sim.metrics import collect_run
 from agent_db_sim.simkit.probes import InMemorySink
 from agent_db_sim.viz.vcd import write_vcd
 
-__all__ = ["FixtureRun", "synthesize_samples", "make_fixture_run"]
+__all__ = ["FixtureRun", "synthesize_samples", "make_fixture_run", "make_fixture_sweep"]
 
 LLM_SLOTS = 4
 DB_SLOTS = 8
@@ -114,3 +116,105 @@ def make_fixture_run(
         cfg.update(cfg_extra)
     db = collect_run(run_dir, sink, cfg=cfg)
     return FixtureRun(run_dir=run_dir, vcd=vcd, metrics_db=db, sink=sink)
+
+
+# --------------------------------------------------------------------- #
+# synthetic sweep fixture (stage-6, lane B): N run dirs + summary        #
+# --------------------------------------------------------------------- #
+
+def make_fixture_sweep(
+    sweep_dir: Any,
+    runs: Optional[List[Dict[str, Any]]] = None,
+    name: str = "fixture-sweep",
+) -> Path:
+    """Build a synthetic sweep root: per-run ``make_fixture_run`` dirs plus a
+    ``sweep_summary.json`` with the e2e percentiles / bottleneck winners each
+    runs' ``metrics.db`` contains (mirroring pipeline.summarize_run fields).
+
+    Each entry in ``runs``: ``run_id``, ``values`` (dotted factor names),
+    optionally ``agents``/``seed``/``until``. Returns the sweep root.
+    """
+    sweep_dir = Path(sweep_dir)
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    if runs is None:
+        runs = [
+            {
+                "run_id": "0000-db__topology=centralized",
+                "values": {
+                    "db.topology": "centralized",
+                    "db.compute_nodes": 4, "agents.count": 8,
+                },
+            },
+            {
+                "run_id": "0001-db__topology=distributed",
+                "values": {
+                    "db.topology": "distributed",
+                    "db.compute_nodes": 4, "agents.count": 8,
+                },
+            },
+        ]
+    entries: List[Dict[str, Any]] = []
+    for run in runs:
+        fixture = make_fixture_run(
+            sweep_dir / str(run["run_id"]),
+            agents=int(run.get("agents", 3)),
+            until=float(run.get("until", 30.0)),
+            seed=int(run.get("seed", 7)),
+        )
+        conn = sqlite3.connect(f"file:{fixture.metrics_db}?mode=ro", uri=True)
+        try:
+            pct = conn.execute(
+                "SELECT p50, p95, p99, n FROM latency_percentiles "
+                "WHERE source='e2e' AND kind='latency'"
+            ).fetchone()
+            win = conn.execute(
+                "SELECT component, stage, score, queue_share FROM bottleneck "
+                "ORDER BY score DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        entries.append(
+            {
+                "run_id": str(run["run_id"]),
+                "values": dict(run.get("values") or {}),
+                "e2e_percentiles": (
+                    dict(zip(("p50", "p95", "p99", "n"), pct)) if pct else None
+                ),
+                "bottleneck_winner": (
+                    {
+                        "component": win[0], "stage": win[1],
+                        "score": win[2], "queue_share": win[3],
+                    }
+                    if win else None
+                ),
+            }
+        )
+    factor_values: Dict[str, List[Any]] = {}
+    for entry in entries:
+        for key, value in entry["values"].items():
+            key = str(key)
+            if key not in factor_values:
+                factor_values[key] = []
+            if value not in factor_values[key]:
+                factor_values[key].append(value)
+    summary = {
+        "name": name,
+        "out_root": str(sweep_dir.parent),
+        "n_runs": len(entries),
+        "factors": factor_values,
+        "runs": entries,
+        "comparison": {
+            "by_run": [
+                {
+                    "values": e["values"],
+                    "e2e_p95": (e["e2e_percentiles"] or {}).get("p95"),
+                    "bottleneck": e["bottleneck_winner"],
+                }
+                for e in entries
+            ],
+        },
+    }
+    (sweep_dir / "sweep_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True, default=str) + "\n"
+    )
+    return sweep_dir

@@ -7,6 +7,10 @@
 - ``GET /vcd``          the raw VCD file (Surfer deep-dive link, post-run)
 - ``GET /reports``      auto-indexed report templates
 - ``GET /reports/<k>``  rendered report from metrics.db (Jinja2 + Plotly)
+- ``GET /sweeps``       list sweep roots found under ``sweeps_root`` (JSON)
+- ``GET /sweeps/<s>``   sweep-comparison report over that sweep root
+                        (default template ``sweep_compare``)
+- ``GET /sweeps/<s>/reports/<t>``  sweep report with an explicit template
 
 SSE tail discipline per ticket 01: the server holds back the newest
 ``#timestamp`` block (it may still be mid-write); clients only ever see
@@ -29,6 +33,7 @@ from fastapi.templating import Jinja2Templates
 from agent_db_sim.viz.report import (
     render_report,
     render_reports_index,
+    render_sweep_report,
     static_dir,
     templates_dir,
 )
@@ -51,10 +56,17 @@ def _sse(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
-def create_app(run_dir: Any) -> FastAPI:
-    """Build the visualization app around one run directory."""
+def create_app(run_dir: Any, sweeps_root: Optional[str] = None) -> FastAPI:
+    """Build the visualization app around one run directory.
+
+    ``sweeps_root`` scopes ``GET /sweeps`` discovery; it defaults to the
+    run dir's parent (the usual ``runs/`` layout, where sweep roots —
+    directories holding ``sweep_summary.json`` and per-run ``metrics.db``
+    dirs — are siblings of the served run).
+    """
     run_dir = Path(run_dir)
     vcd_path = run_dir / VCD_NAME
+    sweeps_root = Path(sweeps_root) if sweeps_root is not None else run_dir.parent
 
     app = FastAPI(title="agent-db-sim viz", version="0.1.0")
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -144,9 +156,65 @@ def create_app(run_dir: Any) -> FastAPI:
             pass
         try:
             html = render_report(run_dir, name=name, standalone=False, extra_context=extra)
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ValueError) as exc:
+            # FileNotFoundError: unknown template; ValueError: e.g. a sweep-only
+            # template was requested against a single run (404 + guidance).
             raise _not_found(str(exc)) from exc
         return Response(html, media_type="text/html")
+
+    # -- sweeps (stage-6 lane B) ---------------------------------------- #
+    def _is_sweep_dir(directory: Path) -> bool:
+        if not (directory / "sweep_summary.json").exists():
+            return any(
+                (child / "metrics.db").exists()
+                for child in directory.iterdir() if child.is_dir()
+            )
+        return True
+
+    def _list_sweeps() -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        if not sweeps_root.exists():
+            return out
+        for child in sorted(sweeps_root.iterdir()):
+            if not child.is_dir() or not _is_sweep_dir(child):
+                continue
+            n_runs = sum(
+                1 for c in child.iterdir()
+                if c.is_dir() and (c / "metrics.db").exists()
+            )
+            out.append({"name": child.name, "path": str(child), "n_runs": n_runs})
+        return out
+
+    def _resolve_sweep(sweep: str) -> Path:
+        resolved_root = sweeps_root.resolve()
+        candidate = (sweeps_root / sweep).resolve()
+        if candidate.parent != resolved_root:
+            raise _not_found(f"no sweep {sweep!r} under {sweeps_root}")
+        if not candidate.is_dir():
+            raise _not_found(f"no sweep {sweep!r} under {sweeps_root}")
+        return candidate
+
+    def _render_sweep(sweep: str, template: str) -> Response:
+        try:
+            sweep_dir = _resolve_sweep(sweep)
+            html = render_sweep_report(
+                sweep_dir, name=template, standalone=False,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise _not_found(str(exc)) from exc
+        return Response(html, media_type="text/html")
+
+    @app.get("/sweeps")
+    def sweeps() -> JSONResponse:
+        return JSONResponse({"sweeps": _list_sweeps()})
+
+    @app.get("/sweeps/{sweep}")
+    def sweep_default(sweep: str) -> Response:
+        return _render_sweep(sweep, "sweep_compare")
+
+    @app.get("/sweeps/{sweep}/reports/{template}")
+    def sweep_report(sweep: str, template: str) -> Response:
+        return _render_sweep(sweep, template)
 
     return app
 

@@ -28,9 +28,14 @@ per topology, and what scale-out changes).
 
 from __future__ import annotations
 
+import itertools
 import json
+import multiprocessing
 import shutil
 import sqlite3
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -40,6 +45,7 @@ from agent_db_sim.metrics.collect import (
     rebuild_samples,
     start_collection,
 )
+from agent_db_sim.simkit.errors import SweepError
 from agent_db_sim.simkit.probes import InMemorySink
 from agent_db_sim.simkit.registry import build_model
 from agent_db_sim.simkit.runner import run_model
@@ -49,6 +55,7 @@ from agent_db_sim.simkit.sweep import (
     apply_factors,
     read_sweep,
     run_id_for,
+    validate_jobs,
 )
 from agent_db_sim.viz.report import render_report, static_dir
 from agent_db_sim.viz.vcd import write_vcd
@@ -252,55 +259,284 @@ def _condense(summary: Dict[str, Any]) -> Dict[str, Any]:
 # factorial sweep                                                              #
 # --------------------------------------------------------------------------- #
 
+@dataclass(frozen=True)
+class _RunSpec:
+    """One enumerated run: what a worker needs to execute it in isolation."""
+
+    index: int
+    run_id: str
+    directory: Path
+    run_cfg: Any
+    values: Dict[str, Any]
+
+
+def _run_one(spec: _RunSpec) -> Dict[str, Any]:
+    """Worker entry point: execute one run's full pipeline in this process.
+
+    Every child process starts fresh (spawn context), so the model is built
+    from scratch with the run's own config: the RNG streams derive from
+    ``sim.seed`` + component paths (hash-seed independent) and never touch
+    process-global state, therefore each run's summary is deterministic and
+    independent of execution order / parallelism. Never raises: failures come
+    back as ``ok=False`` records with the error message captured.
+    """
+    started = time.monotonic()
+    record: Dict[str, Any] = {
+        "index": spec.index,
+        "run_id": spec.run_id,
+        "values": spec.values,
+        "directory": str(spec.directory),
+    }
+    try:
+        summary = execute_run(spec.run_cfg, spec.directory)
+        record["ok"] = True
+        record["summary"] = summary
+    except BaseException as exc:  # noqa: BLE001 - failure is data, not a crash
+        record["ok"] = False
+        record["error"] = str(exc)
+        record["error_type"] = type(exc).__name__
+        # the config snapshot is written before execution, so the sweep
+        # comparison still knows which factors the failed run carried
+        config_path = spec.directory / "config.yaml"
+        if config_path.exists():
+            record["config"] = _config_digest(
+                OmegaConf.to_container(  # type: ignore[arg-type]
+                    OmegaConf.load(config_path), resolve=False
+                )
+            )
+    record["duration"] = time.monotonic() - started
+    return record
+
+
+def _progress(record: Dict[str, Any], done: int, total: int) -> None:
+    """Per-run completion line, printed as child processes finish.
+
+    Completion order is nondeterministic under ``--jobs N``; the final
+    ``sweep_summary`` echo (and the file itself) stay in enumeration order.
+    """
+    tag = f"[{done}/{total}] {record['run_id']}"
+    if record["ok"]:
+        line = f"{tag} done in {record['duration']:.1f}s"
+    else:
+        line = f"{tag} FAILED in {record['duration']:.1f}s: {record['error']}"
+    print(line, flush=True)
+
+
+def _summary_from_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Aggregate one worker record into a sweep-summary run entry."""
+    if record["ok"]:
+        out = dict(record["summary"])
+        out.update(
+            {"run_id": record["run_id"], "values": dict(record["values"])}
+        )
+        out["failed"] = False
+        return out
+    # failed run: keep the run's identity + factor digest, and neutral
+    # placeholders for the analytical tables so summary consumers can rely
+    # on the same keys across entries
+    digest = record.get("config") or {}
+    return {
+        **digest,
+        "run_id": record["run_id"],
+        "values": record["values"],
+        "percentiles": [],
+        "bottleneck": [],
+        "utilization_top": [],
+        "e2e_percentiles": None,
+        "bottleneck_winner": None,
+        "failed": True,
+        "error": record["error"],
+        "error_type": record["error_type"],
+    }
+
+
 def enumerate_sweep(
     cfg: Any,
     out_root: Any = "runs",
+    jobs: int = 1,
+    fail_fast: bool = False,
 ) -> Tuple[List[RunResult], Dict[str, Any]]:
     """Enumerate the scenario's sweep factors and run the full pipeline once
     per combination, sharing the run-dir layout of simkit's sweep runner
-    (``<out_root>/<sweep-name>/<run-id>/``)."""
+    (``<out_root>/<sweep-name>/<run-id>/``).
+
+    ``jobs`` selects the bounded-core execution model: ``1`` (default) runs
+    every combination sequentially in this process — byte-identical to the
+    pre-parallel behavior — while ``N >= 2`` executes the runs in a
+    ``ProcessPoolExecutor`` of
+    ``max_workers = min(N, len(runs))`` spawn-context children. Each child
+    returns one run record; the parent aggregates in enumeration order, so
+    ``sweep_summary.json``/``.html`` are identical to the sequential output
+    (golden-tested). A failed child marks its run failed in the summary
+    (error message captured) and does not abort the sweep, unless
+    ``fail_fast`` stops the remaining queued runs.
+    """
+    jobs = validate_jobs(jobs)
     name, factors = read_sweep(cfg)
     sweep_dir = Path(out_root) / _sanitize(name)
     sweep_dir.mkdir(parents=True, exist_ok=True)
-    results: List[RunResult] = []
-    runs: List[Dict[str, Any]] = []
 
-    import itertools
-
+    specs: List[_RunSpec] = []
     for index, combo in enumerate(itertools.product(*factors.values())):
         assignments = dict(zip(factors.keys(), combo))
         run_cfg = apply_factors(cfg, assignments)
         run_id = run_id_for(index, assignments)
-        directory = sweep_dir / run_id
-        try:
-            directory.mkdir(parents=True)
-        except FileExistsError as exc:
-            from agent_db_sim.simkit.errors import SweepError
-
-            raise SweepError(
-                f"run directory already exists: {directory} "
-                f"(remove it or change out_root to re-run)"
-            ) from exc
-        summary = execute_run(run_cfg, directory)
-        results.append(
-            RunResult(index=index, run_id=run_id, directory=directory, values=assignments)
+        specs.append(
+            _RunSpec(
+                index=index,
+                run_id=run_id,
+                directory=sweep_dir / run_id,
+                run_cfg=run_cfg,
+                values=assignments,
+            )
         )
-        runs.append({"run_id": run_id, "values": assignments, **summary})
+
+    total = len(specs)
+    records, aborted = _execute_runs(specs, jobs=jobs, fail_fast=fail_fast)
+
+    results: List[RunResult] = []
+    runs: List[Dict[str, Any]] = []
+    # aggregate in enumeration order regardless of completion order
+    for record in sorted(records, key=lambda rec: rec["index"]):
+        results.append(
+            RunResult(
+                index=record["index"],
+                run_id=record["run_id"],
+                directory=Path(record["directory"]),
+                values=record["values"],
+            )
+        )
+        runs.append(_summary_from_record(record))
 
     comparison = _compare_runs(runs)
-    sweep_summary = {
+    sweep_summary: Dict[str, Any] = {
         "name": name,
         "out_root": str(Path(out_root)),
         "n_runs": len(results),
+        "jobs": jobs,
         "factors": factors,
         "runs": runs,
         "comparison": comparison,
     }
+    if aborted:
+        n_done = len(records)
+        sweep_summary["aborted"] = True
+        sweep_summary["skipped"] = max(0, total - n_done)
     (sweep_dir / "sweep_summary.json").write_text(
         json.dumps(sweep_summary, indent=2, sort_keys=True, default=str) + "\n"
     )
     (sweep_dir / "sweep_summary.html").write_text(_render_sweep_html(sweep_summary))
     return results, sweep_summary
+
+
+def _fresh_run_dir(directory: Path) -> Path:
+    """Create a run's private directory (must not already exist)."""
+    try:
+        directory.mkdir(parents=True)
+    except FileExistsError as exc:
+        raise SweepError(
+            f"run directory already exists: {directory} "
+            f"(remove it or change out_root to re-run)"
+        ) from exc
+    return directory
+
+
+def _execute_runs(
+    specs: List[_RunSpec],
+    jobs: int,
+    fail_fast: bool,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Execute the enumerated run specs; returns ``(records, aborted)``.
+
+    ``jobs == 1`` stays fully sequential and in-process. ``jobs > 1`` routes
+    through a bounded ``ProcessPoolExecutor`` (spawn context,
+    ``max_workers = min(jobs, len(specs))``): children are submitted lazily so
+    each run dir is created just-in-time and ``fail_fast`` leaves the
+    not-yet-submitted runs (and their directories) untouched. Every future is
+    consumed in the executor's completion order, but ``records`` is returned
+    unordered — the caller aggregates in enumeration order.
+    """
+    total = len(specs)
+    records: List[Dict[str, Any]] = []
+    done = 0
+
+    def accept(record: Dict[str, Any]) -> None:
+        nonlocal done
+        done += 1
+        _progress(record, done, total)
+        records.append(record)
+
+    if jobs == 1 or total <= 1:
+        # sequential fast path: identical to the historical behavior, plus
+        # per-run progress lines and fail-fast handling
+        for spec in specs:
+            _fresh_run_dir(spec.directory)
+            record = _run_one(spec)
+            accept(record)
+            if not record["ok"] and fail_fast:
+                return records, True
+        return records, False
+
+    # ---- parallel path (bounded-core workers) ------------------------------
+    max_workers = min(jobs, total)
+    submit_cursor = 0
+    pending: Dict[Future, _RunSpec] = {}
+    aborted = False
+
+    executor = ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=multiprocessing.get_context("spawn"),
+    )
+    try:
+
+        def submit_next() -> None:
+            """Keep a free worker slot busy (dir created just-in-time)."""
+            nonlocal submit_cursor
+            if aborted or submit_cursor >= total or len(pending) >= max_workers:
+                return
+            spec = specs[submit_cursor]
+            submit_cursor += 1
+            _fresh_run_dir(spec.directory)
+            pending[executor.submit(_run_one, spec)] = spec
+
+        def refill() -> None:
+            for _ in range(max_workers):
+                submit_next()
+
+        refill()  # seed the pool with the first min(jobs, total) runs
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                spec = pending.pop(future)
+                if future.cancelled():
+                    # drained queued run (cancelled right after fail-fast):
+                    # it never executed, so it is not reported
+                    continue
+                try:
+                    record = future.result()
+                except BaseException as exc:  # broken pool / pickling error
+                    record = {
+                        "index": spec.index,
+                        "run_id": spec.run_id,
+                        "values": spec.values,
+                        "directory": str(spec.directory),
+                        "ok": False,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "duration": 0.0,
+                    }
+                accept(record)
+                if not record["ok"] and fail_fast:
+                    aborted = True
+                    for live in pending:
+                        live.cancel()
+
+            # each completed run frees a slot: refill up to the cap
+            refill()
+    finally:
+        executor.shutdown(wait=True)
+
+    return records, aborted
 
 
 def _compare_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:

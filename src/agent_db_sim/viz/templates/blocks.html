@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block head %}
+<script src="{{ plotly_src }}"></script>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  table.latency { border-collapse: collapse; margin: 1rem 0; }
+  table.latency th, table.latency td { border: 1px solid #ccc; padding: 0.25rem 0.7rem; text-align: right; }
+  table.latency th:first-child, table.latency td:first-child { text-align: left; }
+  .figure { min-height: 380px; margin: 1.5rem 0; }
+  h2 { margin-top: 2.5rem; }
+</style>
+{% endblock %}
+{% block title %}report: {{ template_name }} — {{ meta.run_name }}{% endblock %}
+{% block content %}
+{% for blk in blocks %}
+<section id="block-{{ blk.slug }}" class="block">
+  <h2>{{ blk.title }}</h2>
+  {{ blk.body | safe }}
+</section>
+{% endfor %}
+{% endblock %}

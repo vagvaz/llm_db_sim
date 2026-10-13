@@ -135,6 +135,21 @@ def sweep(
         "-p",
         help="Named profile overlay to merge on top of the scenario config.",
     ),
+    jobs: Optional[int] = typer.Option(
+        None,
+        "--jobs",
+        "-j",
+        min=1,
+        help=(
+            "Maximum parallel worker processes for the sweep runs "
+            "(default: sweep.max_jobs from the scenario, else 1 = sequential)."
+        ),
+    ),
+    fail_fast: bool = typer.Option(
+        False,
+        "--fail-fast",
+        help="Abort the remaining queued runs after the first failed run.",
+    ),
 ) -> None:
     """Enumerate the scenario's sweep factors: one full run per combination.
 
@@ -142,18 +157,36 @@ def sweep(
     run.vcd, report.html, summary.json) plus a sweep-level
     ``sweep_summary.json`` / ``sweep_summary.html`` comparing the runs. The
     placeholder ``loop:``-only scenarios keep simkit's stub sweep runner.
+
+    ``--jobs N`` bounds the cores used: the factorial runs execute in a
+    process pool of ``min(N, len(runs))`` workers; the sweep summary stays in
+    enumeration order (identical to the sequential ``--jobs 1`` output).
+    A failed run marks its entry failed in the summary; a failed-dominated
+    sweep exits non-zero.
     """
+    from omegaconf import OmegaConf
+
     try:
         cfg = load_scenario(scenario, profile)
     except ConfigError as exc:
         typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
 
+    # workers: --jobs N > sweep.max_jobs config key > 1 (sequential)
+    from agent_db_sim.simkit.sweep import validate_jobs
+
+    if jobs is None:
+        configured = OmegaConf.select(cfg, "sweep.max_jobs")
+        jobs = 1 if configured is None else int(configured)
+    workers = validate_jobs(jobs)
+
     try:
         if "db" in cfg:
             from agent_db_sim.pipeline import enumerate_sweep
 
-            results, summary = enumerate_sweep(cfg, out_root=out)
+            results, summary = enumerate_sweep(
+                cfg, out_root=out, jobs=workers, fail_fast=fail_fast
+            )
         else:
             from agent_db_sim.simkit.sweep import run_sweep
 
@@ -164,19 +197,37 @@ def sweep(
         raise typer.Exit(code=2) from exc
 
     name = results[0].directory.parent.name if results else "sweep"
+    n_failed = sum(1 for run in summary.get("runs", []) if run.get("failed"))
+    aborted = bool(summary.get("aborted"))
+    if aborted:
+        typer.echo(
+            f"sweep aborted early: {summary.get('skipped', '?')} queued run(s) skipped"
+        )
     typer.echo(
         f"sweep {name!r}: {len(results)} runs written under "
-        f"{out}/{name}/"
+        f"{out}/{name}/ (workers={workers})"
     )
-    if summary:
-        for run in summary.get("runs", []):
-            e2e = run.get("e2e_percentiles") or {}
-            winner = run.get("bottleneck_winner") or {}
-            typer.echo(
-                f"  {run['run_id']}: e2e p95={e2e.get('p95', float('nan')):.3f} "
-                f"bottleneck={winner.get('component', '<none>')}."
-                f"{winner.get('stage', '*')} (score={winner.get('score', 0):.3f})"
+    for run in summary.get("runs", []):
+        if run.get("failed"):
+            typer.secho(
+                f"  {run['run_id']}: FAILED: {run.get('error', '<unknown>')}",
+                fg=typer.colors.RED,
             )
+            continue
+        e2e = run.get("e2e_percentiles") or {}
+        winner = run.get("bottleneck_winner") or {}
+        typer.echo(
+            f"  {run['run_id']}: e2e p95={e2e.get('p95', float('nan')):.3f} "
+            f"bottleneck={winner.get('component', '<none>')}."
+            f"{winner.get('stage', '*')} (score={winner.get('score', 0):.3f})"
+        )
+    if n_failed:
+        typer.secho(
+            f"sweep finished with {n_failed} failed run(s) "
+            f"(of {len(summary.get('runs', []))} executed)",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
 
 def _require_viz_run(run_dir: Path) -> None:
     import agent_db_sim.viz.server as viz_server
@@ -226,15 +277,31 @@ def render(
         None, "--out", "-o",
         help="Output HTML path (default: <run-dir>/<name>.html).",
     ),
+    sweep: Optional[Path] = typer.Option(
+        None, "--sweep",
+        exists=True, file_okay=False, readable=True,
+        help=(
+            "Render a sweep-comparison report over a sweep root "
+            "(contains sweep_summary.json) instead of the run dir; "
+            "--name defaults to sweep_compare."
+        ),
+    ),
 ) -> None:
     """Render a report as standalone HTML (no server; CI-friendly)."""
     from agent_db_sim.viz import report as viz_report
     try:
-        html = viz_report.render_report(run_dir, name=name, standalone=True)
-    except FileNotFoundError as exc:
+        if sweep is not None:
+            if name == "standard":
+                name = "sweep_compare"
+            html = viz_report.render_sweep_report(sweep, name=name, standalone=True)
+            dest = sweep
+        else:
+            html = viz_report.render_report(run_dir, name=name, standalone=True)
+            dest = run_dir
+    except (FileNotFoundError, ValueError) as exc:
         typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
-    out_path = Path(out) if out is not None else run_dir / f"{name}.html"
+    out_path = Path(out) if out is not None else dest / f"{name}.html"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html)
     _ship_plotly(out_path.parent)  # script tag points at the local copy

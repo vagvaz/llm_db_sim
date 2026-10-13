@@ -26,7 +26,14 @@ from omegaconf import ListConfig, OmegaConf
 
 from agent_db_sim.simkit.errors import SweepError
 
-__all__ = ["RunResult", "read_sweep", "apply_factors", "run_id_for", "run_sweep"]
+__all__ = [
+    "RunResult",
+    "read_sweep",
+    "apply_factors",
+    "run_id_for",
+    "run_sweep",
+    "validate_jobs",
+]
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -94,6 +101,28 @@ def run_id_for(index: int, assignments: Mapping[str, Any]) -> str:
         for key, value in assignments.items()
     ]
     return f"{index:04d}-" + ",".join(parts)
+
+
+def validate_jobs(jobs: Any) -> int:
+    """Coerce ``--jobs`` / ``sweep.max_jobs`` to a positive worker count.
+
+    ``1`` means fully sequential execution (the historical default); ``N > 1``
+    runs the enumerated combinations in a process pool of
+    ``min(N, len(runs))`` workers. Anything below 1 (or non-numeric) raises a
+    :class:`SweepError` with the fix in the message.
+    """
+    try:
+        value = int(jobs)
+    except (TypeError, ValueError) as exc:
+        raise SweepError(
+            f"max_jobs must be an integer >= 1, got {jobs!r}"
+        ) from exc
+    if value < 1:
+        raise SweepError(
+            f"max_jobs must be an integer >= 1 (got {value}); "
+            "1 = sequential, or pass more workers for a parallel sweep"
+        )
+    return value
 
 
 def run_sweep(

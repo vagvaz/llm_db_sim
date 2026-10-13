@@ -1,0 +1,17 @@
+# sweep smoke scenario: exercises the factorial sweep runner end to end via
+# `agent-db-sim sweep scenarios/sweep_smoke.yaml`. The factors tweak the
+# dummy smoke loop (real component factors arrive with tickets 08-10).
+
+sim:
+  until: 10.0
+
+loop:
+  agents: 1
+  n_timeouts: 2
+  timeout: 1.0
+
+sweep:
+  name: smoke-sweep
+  factors:
+    loop.agents: [1, 2]
+    loop.timeout: [0.5, 1.0]

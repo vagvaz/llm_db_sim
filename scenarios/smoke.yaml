@@ -1,0 +1,20 @@
+# smoke.yaml - minimal end-to-end scenario (SimPy + typer + OmegaConf wiring).
+# The `loop` section drives a dummy closed-loop process; real components
+# arrive with tickets 08-10.
+
+sim:
+  until: 10.0        # simulated time horizon (time units)
+
+loop:                # dummy process: each agent times out n_timeouts times
+  agents: 2
+  n_timeouts: 3
+  timeout: 1.0
+
+profiles:
+  fast:              # `agent-db-sim run scenarios/smoke.yaml --profile fast`
+    sim:
+      until: 5.0
+    loop:
+      agents: 4
+      n_timeouts: 2
+      timeout: 0.5

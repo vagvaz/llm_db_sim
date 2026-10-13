@@ -1,0 +1,57 @@
+# sanity_disaggregated.yaml — 1 agent, disaggregated DB (1 compute node,
+# 1 storage node, ONE shared storage-network segment). Same agent/LLM
+# shape as sanity_single; the only new terms are the two network legs,
+# which are exactly computable:
+#
+#   net_req  = 0.02 (propagation) + 0.01/20 (request size / bandwidth)
+#            = 0.0205
+#   net_resp = 0.02 + 0.08/20     = 0.024      (query volume / bandwidth)
+#
+#   issue     = 0.1
+#   storage   = 0.0001 + max(2.5*0.08, 0.08/0.4, 1/75000) = 0.2001
+#   finalize  = 0.3
+#   D         = 0.1 + 0.0205 + 0.2001 + 0.024 + 0.3 = 0.6446
+#   tau = L + D = 1.0 + 0.6446               = 1.6446
+#
+# The centralized scenarios carry NO net_* stages; this one must have
+# both, with exactly the times above.
+
+sim:
+  until: 51.0
+  seed: 0
+
+metrics:
+  warmup: 0.0
+
+agents:
+  count: 1
+  input_tokens: 512
+  output_tokens: 128
+  query_profiles:
+    - name: flat
+      complexity: 0.4
+      volume: 0.08
+      weight: 1.0
+
+llm:
+  slots: 1
+  input_tokens_per_s: 1024
+  output_tokens_per_s: 256
+  ingress: fifo
+
+db:
+  topology: disaggregated
+  compute_nodes: 1
+  storage_nodes: 1
+  compute:
+    slots: 1
+    ingress: fifo
+    issue_ratio: 0.25
+    phase_split: three_phase
+  storage:
+    backend: ssd
+  network:
+    latency: 0.02
+    bandwidth: 20.0
+    capacity: 8.0
+    request_size: 0.01

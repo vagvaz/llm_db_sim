@@ -1,0 +1,58 @@
+# sanity_parallel.yaml — parallelism without queueing: 2 agents, LLM with
+# TWO slots. The two agents run in perfect lockstep (identical configs,
+# same arrivals), both inference requests overlap in time and both are
+# served the moment they arrive:
+#   L = 512/1024 + 128/256 = 1.0  (even with 2 in flight the shared
+#       token cap 1280/s gives each exactly its phase floor: 640*2/1280 = 1.0)
+#   db latency D = 0.7201, period tau = L + D = 1.7201.
+#
+# The ssd preset keeps per-gb time vs bandwidth-ceiling in exact
+# reciprocity (2.5 vs 0.4 GB/s), so with 2 concurrent storage ops the
+# bandwidth budget doubles against the window and stretches the service.
+# To make "no queueing AND e2e == single-request latency" hold exactly,
+# the storage backend keeps the ssd name but raises the ceilings far
+# above the per-gb window (overrides below): the budget terms finish in
+# ~1e-4 while the per_gb window is 0.32, so two concurrent db requests
+# each take the same time one lone request would.
+#
+#   issue = 0.1, storage = 0.0001 + max(4*0.08, 0.08/1000, 1e-6) = 0.3201,
+#   finalize = 0.3  =>  D = 0.7201, tau = 1.7201.
+
+sim:
+  until: 51.0
+  seed: 0
+
+metrics:
+  warmup: 0.0
+
+agents:
+  count: 2
+  input_tokens: 512
+  output_tokens: 128
+  query_profiles:
+    - name: flat
+      complexity: 0.4
+      volume: 0.08
+      weight: 1.0
+
+llm:
+  slots: 2
+  input_tokens_per_s: 1024
+  output_tokens_per_s: 256
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 1
+  storage_nodes: 1
+  compute:
+    slots: 2
+    ingress: fifo
+    issue_ratio: 0.25
+    phase_split: three_phase
+  storage:
+    backend: ssd
+    overrides:
+      per_gb_time: 4.0
+      bandwidth_ceiling: 1000.0
+      iops_ceiling: 1000000.0

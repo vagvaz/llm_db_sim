@@ -1,0 +1,52 @@
+# sanity_queue.yaml — queueing arithmetic the human can trace: 2 agents,
+# LLM with ONE slot. Both agents submit their first inference at t=0;
+# FIFO admission puts agent-0 first, so agent-1 waits exactly L = 1.0.
+# After that the two agents ping-pong: each LLM service (1.0) is followed
+# by that agent's db (0.6001 < L), so services alternate
+#   a0: [0,1) [2,3) [4,5)...   a1: [1,2) [3,4) [5,6)...
+# and every later inference (both agents) queues exactly L - D = 0.3999.
+#
+#   L = 512/1024 + 128/256  = 1.0,  D = 0.6001,  period 2L = 2.0
+#   e2e(a0 #1) = 1.0, e2e(a1 #1) = 2.0 = service + measured wait,
+#   e2e(inf, k>=2) = 2L - D = 1.3999, e2e(all db) = D = 0.6001.
+#
+# DB compute has 2 slots and (timings above) the two db spans never
+# overlap, so the DB side itself never queues — the queue is exactly the
+# LLM slot serialization.
+
+sim:
+  # 51.5 intentionally keeps every event strictly inside the horizon
+  # (completions land on integer times <= 51.0).
+  until: 51.5
+  seed: 0
+
+metrics:
+  warmup: 0.0
+
+agents:
+  count: 2
+  input_tokens: 512
+  output_tokens: 128
+  query_profiles:
+    - name: flat
+      complexity: 0.4
+      volume: 0.08
+      weight: 1.0
+
+llm:
+  slots: 1
+  input_tokens_per_s: 1024
+  output_tokens_per_s: 256
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 1
+  storage_nodes: 1
+  compute:
+    slots: 2
+    ingress: fifo
+    issue_ratio: 0.25
+    phase_split: three_phase
+  storage:
+    backend: ssd

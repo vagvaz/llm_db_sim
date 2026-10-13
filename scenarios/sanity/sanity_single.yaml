@@ -1,0 +1,55 @@
+# sanity_single.yaml — 1-of-everything: 1 AgentClient, 1 LLMEndpoint
+# (1 slot), centralized DBEndpoint (1 compute node, 1 slot, 1 colocated
+# storage node on the plain `ssd` preset).
+#
+# Every quantity is a constant: fixed token counts, ONE fixed query
+# profile (weight 1.0), no distributions that depend on the seed. With a
+# single closed-loop agent nothing ever queues, so the whole run is a
+# periodic arithmetic system a human can verify on paper:
+#
+#   L = 512/1024 + 128/256                = 1.0    (LLM service, solo)
+#   issue     = 0.25 * 0.4                = 0.1
+#   storage   = 0.0001 + max(2.5*0.08, 0.08/0.4, 1/75000)
+#             = 0.0001 + 0.2              = 0.2001 (ssd preset virtues)
+#   finalize  = 0.75 * 0.4                = 0.3
+#   D (db latency)                        = 0.6001
+#   tau = L + D = loop period             = 1.6001
+#
+# The test (tests/test_sanity_scenarios.py) recomputes these exact
+# numbers from the config and asserts every stage and the e2e latency
+# per request, per hop, within 1e-9.
+
+sim:
+  until: 51.0
+  seed: 0
+
+metrics:
+  warmup: 0.0        # the loop is exactly periodic; stats cover all of it
+
+agents:
+  count: 1
+  input_tokens: 512      # fixed draws — zero randomness anywhere
+  output_tokens: 128
+  query_profiles:
+    - name: flat         # the single fixed class
+      complexity: 0.4
+      volume: 0.08
+      weight: 1.0
+
+llm:
+  slots: 1
+  input_tokens_per_s: 1024
+  output_tokens_per_s: 256
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 1
+  storage_nodes: 1
+  compute:
+    slots: 1
+    ingress: fifo
+    issue_ratio: 0.25
+    phase_split: three_phase
+  storage:
+    backend: ssd

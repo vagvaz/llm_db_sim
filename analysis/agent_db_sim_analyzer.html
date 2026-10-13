@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent–DB Workload Analyzer</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151a21; --panel2:#1b222c; --border:#262e3a;
+    --text:#d7dde6; --muted:#8b95a3; --accent:#5aa9e6; --accent2:#8fd3ff;
+    --good:#4cc38a; --warn:#e5b45a; --bad:#e05d5d; --grid:#232b37; --mcc:#4cc38a;
+    --mono:ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.45}
+  header{padding:22px 28px 8px}
+  header h1{font-size:19px;font-weight:650;margin:0}
+  header p{margin:4px 0 0;color:var(--muted);font-size:13px;max-width:82ch}
+  main{display:grid;grid-template-columns:minmax(300px,350px) 1fr;gap:20px;
+    padding:12px 28px 30px;align-items:start;max-width:1500px;margin:0 auto}
+  @media (max-width:920px){ main{grid-template-columns:1fr} }
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+  .card h2{font-size:12px;font-weight:650;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin:0 0 10px}
+  .field{display:grid;grid-template-columns:1fr 96px;gap:10px;align-items:center;margin-bottom:9px}
+  .field label{font-size:13px}
+  .field .sub{display:block;font-size:11.5px;color:var(--muted)}
+  input[type=number]{background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    border-radius:6px;padding:6px 8px;font-family:var(--mono);font-size:13px;text-align:right}
+  input[type=number]:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  input[type=range]{width:100%;accent-color:var(--accent);height:20px}
+  .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;
+    padding:7px 14px;font-size:13px;cursor:pointer}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{border-color:var(--accent);color:var(--accent2)}
+  .tabs{display:flex;gap:6px;margin-bottom:12px}
+  .tab{flex:1;text-align:center;padding:8px 4px;font-size:13px;border:1px solid var(--border);
+    border-radius:8px;cursor:pointer;color:var(--muted);background:var(--panel2)}
+  .tab.on{border-color:var(--accent);color:var(--accent2);background:rgba(90,169,230,.09)}
+  .hint{font-size:11.5px;color:var(--muted)}
+  .banner{display:none;border-radius:8px;padding:9px 14px;font-size:13px;margin-bottom:12px;border:1px solid}
+  .banner.show{display:block}
+  .banner.warn{border-color:var(--warn);color:var(--warn);background:rgba(229,180,90,.08)}
+  .banner.bad{border-color:var(--bad);color:var(--bad);background:rgba(224,93,93,.08)}
+  .banner.ok{border-color:var(--good);color:var(--good);background:rgba(76,195,138,.07)}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-bottom:14px}
+  .tile{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:11px 13px}
+  .tile .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:3px}
+  .tile .v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--accent2)}
+  .tile.mcmode .v{color:var(--mcc)}
+  .tile .a{display:block;font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px;min-height:13px}
+  .chartcard{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:13px 14px;margin-bottom:14px}
+  .chartcard h3{font-size:13px;font-weight:600;margin:0 0 2px}
+  .chartcard .note{font-size:12px;color:var(--muted);margin:0 0 8px}
+  svg{display:block;width:100%;height:auto}
+  table{border-collapse:collapse;width:100%;font-size:12.5px}
+  th{color:var(--muted);font-weight:600;text-align:right;padding:5px 9px;border-bottom:1px solid var(--border)}
+  td{padding:5px 9px;text-align:right;font-family:var(--mono);border-bottom:1px solid var(--grid)}
+  td:first-child,th:first-child{text-align:left;font-family:inherit}
+  tr:last-child td{border-bottom:none}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:6px;flex-wrap:wrap}
+  .legend .sw{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
+  details.assumptions{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 16px;font-size:12.5px;color:var(--muted)}
+  details.assumptions summary{cursor:pointer;color:var(--text);font-size:13px;font-weight:600}
+  details.assumptions ul{margin:8px 0 2px;padding-left:18px}
+  details.assumptions li{margin-bottom:5px}
+  code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:11.5px}
+  .credit{font-size:11.5px;color:var(--muted);padding:0 28px 26px;max-width:1500px;margin:0 auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent–DB Workload Analyzer</h1>
+  <p>Closed-loop statistical model of N agents cycling <em>think → LLM call → DB query</em>.
+     Analytic engine: exact Gordon–Newell/Buzen closed-chain means (exact at SCV=1, cross-checked vs. CTMC)
+     plus calibrated latency percentiles. Monte Carlo engine: exact FCFS discrete-event simulation.
+     See the assumptions panel for model math & references; the repo's DES simulator is documented
+     separately in the root README.</p>
+</header>
+
+<main>
+  <!-- ============ parameters ============ -->
+  <section>
+    <div class="card">
+      <h2>Mode</h2>
+      <div class="tabs">
+        <div class="tab on" id="tabA">Analytic</div>
+        <div class="tab" id="tabM">Monte&nbsp;Carlo</div>
+        <div class="tab" id="tabC">Compare</div>
+      </div>
+      <div class="hint">Analytic recomputes live on inputs. Monte Carlo runs on Recompute or on entering its tab (seeded, reproducible).</div>
+    </div>
+
+    <div class="card">
+      <h2>Agents</h2>
+      <div style="display:grid;grid-template-columns:1fr 96px;gap:10px;align-items:center">
+        <label style="font-size:13px">N — concurrent agents</label>
+        <input type="number" id="N" value="8" min="1" max="2000" step="1">
+      </div>
+      <input type="range" id="N_s" min="1" max="120" step="1" value="8">
+      <div class="field" style="margin-top:8px">
+        <label>τ<sub>think</sub> — mean think time <span class="sub">s · exponential delay per cycle</span></label>
+        <input type="number" id="tauThink" value="2.0" min="0" max="600" step="0.1">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>LLM endpoint (M/G/c)</h2>
+      <div class="field">
+        <label>τ<sub>LLM</sub> — mean service <span class="sub">per call (s)</span></label>
+        <input type="number" id="tauLLM" value="1.5" min="0.001" max="600" step="0.1">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 96px;align-items:center">
+        <label style="font-size:13px">c<sub>LLM</sub> — servers</label>
+        <input type="number" id="cLLM" value="4" min="1" max="2000" step="1">
+      </div>
+      <input type="range" id="cLLM_s" min="1" max="64" step="1" value="4" style="margin-top:4px">
+      <div class="field" style="margin-top:8px">
+        <label>c²<sub>s,LLM</sub> — service SCV <span class="sub">1 = exponential · 0 = deterministic</span></label>
+        <input type="number" id="csLLM" value="1.0" min="0" max="10" step="0.1">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>DB endpoint (M/G/c)</h2>
+      <div class="field">
+        <label>τ<sub>DB</sub> — mean service <span class="sub">per query (s)</span></label>
+        <input type="number" id="tauDB" value="0.3" min="0.001" max="600" step="0.05">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 96px;align-items:center">
+        <label style="font-size:13px">c<sub>DB</sub> — servers</label>
+        <input type="number" id="cDB" value="8" min="1" max="2000" step="1">
+      </div>
+      <input type="range" id="cDB_s" min="1" max="128" step="1" value="8" style="margin-top:4px">
+      <div class="field" style="margin-top:8px">
+        <label>c²<sub>s,DB</sub> — service SCV</label>
+        <input type="number" id="csDB" value="1.0" min="0" max="10" step="0.1">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Numerics</h2>
+      <div class="field">
+        <label>Grid points <span class="sub">percentile engine</span></label>
+        <input type="number" id="gridN" value="2048" min="256" max="8192" step="128">
+      </div>
+      <div class="field">
+        <label>Horizon × mean latency</label>
+        <input type="number" id="horizon" value="12" min="4" max="40" step="1">
+      </div>
+      <div class="field">
+        <label>Sweep max agents</label>
+        <input type="number" id="sweepMax" value="120" min="10" max="300" step="1">
+      </div>
+      <div class="field">
+        <label>MC cycles kept</label>
+        <input type="number" id="mcN" value="20000" min="500" max="200000" step="500">
+      </div>
+      <div class="field">
+        <label>MC warm-up fraction</label>
+        <input type="number" id="mcWarm" value="0.1" min="0" max="0.5" step="0.01">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>MC seed <span class="sub">0 = random each run</span></label>
+        <input type="number" id="mcSeed" value="42" min="0" max="2147483647" step="1">
+      </div>
+    </div>
+
+    <button class="btn primary" id="recompute" style="width:100%;margin-bottom:14px">Recompute&nbsp;(incl. Monte&nbsp;Carlo)</button>
+  </section>
+
+  <!-- ============ results ============ -->
+  <section>
+    <div class="banner" id="banner"></div>
+
+    <div class="tiles">
+      <div class="tile" id="tile_p50"><div class="k">p50 latency</div><div class="v" id="t_p50">–</div><span class="a" id="a_p50"></span></div>
+      <div class="tile" id="tile_p90"><div class="k">p90 latency</div><div class="v" id="t_p90">–</div><span class="a" id="a_p90"></span></div>
+      <div class="tile" id="tile_p95"><div class="k">p95 latency</div><div class="v" id="t_p95">–</div><span class="a" id="a_p95"></span></div>
+      <div class="tile" id="tile_p99"><div class="k">p99 latency</div><div class="v" id="t_p99">–</div><span class="a" id="a_p99"></span></div>
+      <div class="tile" id="tile_mean"><div class="k">mean ± sd</div><div class="v" id="t_mean">–</div><span class="a" id="a_mean"></span></div>
+      <div class="tile" id="tile_x"><div class="k">throughput X</div><div class="v" id="t_x">–</div><span class="a" id="a_x"></span></div>
+      <div class="tile" id="tile_rho"><div class="k">ρ LLM / DB</div><div class="v" id="t_rho" style="font-size:16px">–</div><span class="a" id="a_rho"></span></div>
+      <div class="tile" id="tile_pwait"><div class="k">P(wait) LLM/DB</div><div class="v" id="t_pwait" style="font-size:16px">–</div><span class="a" id="a_pwait"></span></div>
+    </div>
+
+    <div class="chartcard">
+      <h3>Agent cycle-latency distribution</h3>
+      <p class="note" id="latNote">think + LLM sojourn + DB sojourn · PDF (area) and CDF with percentile markers.</p>
+      <div id="chartLat"></div>
+      <div class="legend">
+        <span id="legAnalytic" style="display:none"><span class="sw" style="background:var(--accent)"></span>analytic</span>
+        <span id="legMc"><span class="sw" style="background:var(--mcc)"></span>Monte Carlo</span>
+        <span><span class="sw" style="background:var(--warn)"></span>percentile markers</span>
+      </div>
+    </div>
+
+    <div class="chartcard">
+      <h3>Saturation sweep — mean cycle latency vs. agent count</h3>
+      <p class="note">Analytic engine · knee (steepest slope) and near-saturated points marked.</p>
+      <div id="chartSweep"></div>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--accent)"></span>mean latency</span>
+        <span><span class="sw" style="background:var(--bad);height:2px"></span>saturated point</span>
+        <span><span class="sw" style="background:var(--warn)"></span>knee</span>
+      </div>
+    </div>
+
+    <div class="chartcard">
+      <h3>Per-station breakdown</h3>
+      <div id="tblWrap"><table><thead id="tblh"></thead><tbody id="tblb"></tbody></table></div>
+    </div>
+
+    <details class="assumptions">
+      <summary>Model assumptions, math & references</summary>
+      <ul>
+        <li><b>Closed loop:</b> each of N agents runs think → LLM → DB sequentially; think time exponential (memoryless); service times general via SCV (c²ₛ = Var/Mean²).</li>
+        <li><b>Analytic means (exact at SCV=1):</b> product-form closed network — Gordon &amp; Newell, <i>Oper. Res.</i> 15(2), 1967; multiserver FCFS valid via the BCMP theorem, <i>JACM</i> 22(2), 1975 — solved exactly by Buzen's convolution (<i>Comm. ACM</i> 16(9), 1973); sojourns via Little's Law (Little, <i>Oper. Res.</i> 9(3), 1961), R = L/X.</li>
+        <li><b>M/G/c (SCV≠1):</b> mean wait inflated by the Allen–Cunneen factor (c²ₐ+c²ₛ)/2 with c²ₐ=1 — Kingman-type (1961) approximation; see Whitt, "The Queueing Network Analyzer", <i>BSTJ</i> 62(9), 1983.</li>
+        <li><b>Latency percentiles:</b> wait modelled as P(W=0) = 1−π̂ else Exp(μ̂) — in the closed chain a waiting agent sees all c servers busy, so the tail rate is μ̂=c/τ (empirically chosen vs Monte Carlo); π̂ = μ̂·W rescaled to reproduce the exact chain mean wait. Phases (Exp(think) ⊛ wait mixtures, shifted by constant services T₀) convolved numerically on a uniform grid → CDF → percentiles. Expect ±10–15% agreement with the MC tab; switch to MC for empirical percentiles.</li>
+        <li><b>Monte Carlo:</b> exact FCFS discrete-event simulation (event list in time order, FIFO queues, per-server busy counts); Gamma service sampling (Marsaglia &amp; Tsang, <i>ACM TOMS</i> 26(3), 2000); percentiles over warm-up-trimmed completed cycles; error O(1/√n).</li>
+        <li><b>Near-saturation:</b> closed chains are stable for finite N (ρ&lt;1); ρ≥0.995 is flagged and the sweep shows rapid growth.</li>
+        <li>General references: Bolch et al., <i>Queueing Networks and Markov Chains</i>, Wiley 2006 · Lazowska et al., <i>Quantitative System Performance</i>, 1984. Verified against a brute-force CTMC stationary solve (see <code>analysis/verify_core.js</code>).</li>
+      </ul>
+    </details>
+  </section>
+</main>
+<footer class="credit">Companion analytic model for <code>agent_db_sim</code> — all computation local, no network.</footer>
+
+<script>
+/*MATHCORE-START*/
+/* agent_db_sim analyzer — math core (browser + node dual-use) */
+
+'use strict';
+
+/* ---------- RNG & samplers ---------- */
+function mulberry32(seed){
+  let a=seed>>>0;
+  return function(){
+    a|=0; a=(a+0x6D2B79F5)|0;
+    let t=Math.imul(a^(a>>>15), 1|a);
+    t=(t+Math.imul(t^(t>>>7), 61|t))^t;
+    return ((t^(t>>>14))>>>0)/4294967296;
+  };
+}
+/* Gamma(k, scale 1): Marsaglia–Tsang for k>=1, Stug trick (G(k)=G(k+1)*U^(1/k)) for k<1 */
+function gamma1(rng, k){
+  if(k<1) return gamma1(rng, k+1)*Math.pow(Math.max(rng(),1e-16), 1/k);
+  const d=k-1/3, c=1/Math.sqrt(9*d);
+  for(;;){
+    let x, v;
+    for(;;){
+      const u=Math.max(rng(),1e-16);
+      x=Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*rng());
+      v=1+c*x;
+      if(v>0) break;
+    }
+    v=v*v*v;
+    const u=Math.max(rng(),1e-16);
+    if(u<1-0.0331*x*x*x*x) return d*v;
+    if(Math.log(u) < 0.5*x*x + d*(1 - v + Math.log(v))) return d*v;
+  }
+}
+/* service-time sampler with mean tau, SCV scv (Var/mean²) */
+function makeSampler(tau, scv, rng){
+  if(scv<0.02) return ()=>tau;
+  const k=1/scv, theta=tau*scv;
+  if(Math.abs(k-1)<1e-9) return ()=> -Math.log(Math.max(rng(),1e-16))*tau;
+  return ()=> gamma1(rng,k)*theta;
+}
+
+/* ---------- Erlang C (M/M/c) ---------- */
+function erlangB(c, a){ let b=1; for(let k=1;k<=c;k++) b = a*b/(k + a*b); return b; }
+function erlangC(c, a){ const b=erlangB(c,a); return b/(1-(a/c)*(1-b)); }
+function logfact(k){ let s=0; for(let i=2;i<=k;i++) s+=Math.log(i); return s; }
+
+/* ---------- product-form weights (log-space to avoid overflow) ---------- */
+/* M/M(c) station weight: f(n) = τ^n/n! (n≤c), τ^c/c!·(τ/c)^(n−c) (n>c) */
+function mmcfLog(c, tau, nMax){
+  const lf=new Array(nMax+1); lf[0]=0;
+  const lt=Math.log(tau);
+  let cur=0;
+  for(let n=1;n<=nMax;n++){
+    if(n<=c)     cur = n*lt - logfact(n);
+  else         cur = lf[n-1] + (lt - Math.log(c));   /* keeps (τ/c) factor at n=c+1 too */
+    lf[n]=cur;
+  }
+  return lf;
+}
+/* infinite-server (think) node weight: f(n)= τ^n / n! */
+function isfLog(tau, nMax){
+  const lf=new Array(nMax+1); lf[0]=0;
+  const lt=Math.log(tau);
+  for(let n=1;n<=nMax;n++) lf[n]=lf[n-1]+lt-Math.log(n);
+  return lf;
+}
+function normExp(lf){
+  let m=-Infinity; for(const v of lf) if(v>m) m=v;
+  const f=new Array(lf.length);
+  for(let i=0;i<lf.length;i++) f[i]=Math.exp(lf[i]-m);
+  return f;
+}
+function convArr(a,b,nMax){
+  const g=new Array(nMax+1).fill(0);
+  const na=Math.min(a.length-1,nMax), nb=Math.min(b.length-1,nMax);
+  for(let i=0;i<=na;i++){
+    const ai=a[i]; if(!ai) continue;
+    for(let j=0;j<=Math.min(nb,nMax-i);j++) g[i+j]+=ai*b[j];
+  }
+  return g;
+}
+
+/* Exact closed chain (Gordon–Newell/Buzen): [think IS if τt>0] ⊛ LLM M/M/cL ⊛ DB M/M/cD */
+function solveClosedChain(P){
+  const N=Math.round(P.N), cL=Math.round(P.cLLM), cD=Math.round(P.cDB);
+  const tauL=P.tauLLM, tauD=P.tauDB, tauT=Math.max(0,P.tauThink);
+  const f1=normExp(mmcfLog(cL,tauL,N));
+  const f2=normExp(mmcfLog(cD,tauD,N));
+  const muL=n=>Math.min(n,cL)/tauL, muD=n=>Math.min(n,cD)/tauD;
+
+  let GN, piL, piD;
+  if(tauT>0){
+    const f0=normExp(isfLog(tauT,N));
+    const restL=convArr(f0,f2,N);
+    GN=convArr(restL,f1,N)[N];
+    if(!(GN>0)) return {ok:false};
+    piL=n=>f1[n]*restL[N-n]/GN;
+    const restD=convArr(f0,f1,N);
+    piD=n=>f2[n]*restD[N-n]/GN;
+  } else {
+    const G=convArr(f1,f2,N);
+    GN=G[N];
+    if(!(GN>0)) return {ok:false};
+    piL=n=>f1[n]*f2[N-n]/GN;
+    piD=n=>f2[n]*f1[N-n]/GN;
+  }
+  let LL=0,XL=0,LD=0,XD=0;
+  for(let n=1;n<=N;n++){
+    const pL=piL(n); LL+=n*pL; XL+=muL(n)*pL;
+    const pD=piD(n); LD+=n*pD; XD+=muD(n)*pD;
+  }
+  const X=(XL+XD)/2;
+  return {ok:true, X, LL, LD, LT:Math.max(0,N-LL-LD), rhoL:X*tauL/cL, rhoD:X*tauD/cD, N};
+}
+
+/* Full analytic solve: exact chain (SCV=1) + Allen–Cunneen SCV inflation + calibrated
+   per-station wait mixtures {pi:P(wait>0), mu:exp tail rate}. */
+function solve(P){
+  const s=solveClosedChain(P);
+  if(!s.ok) return s;
+  const cL=Math.round(P.cLLM), cD=Math.round(P.cDB);
+  const corrL=(1+P.csLLM)/2, corrD=(1+P.csDB)/2;
+  const RL=s.LL/s.X, RD=s.LD/s.X;
+  const WLq=Math.max(0,RL-P.tauLLM)*corrL;
+  const WDq=Math.max(0,RD-P.tauDB)*corrD;
+  const cal=(tau,c,X,Wq)=>{
+    /* closed-chain calibration: a waiting agent sees all c servers busy, so the
+       wait tail is Exp(c/τ) (validated empirically vs MC bake-off); π̂ rescaled
+       so the mixture mean still equals the exact chain mean wait. */
+    let mu=c/tau, pi;
+    if(mu<=1e-12){ pi=1; mu=Wq>0?1/Wq:1e6; }
+    else{
+      pi=mu*Wq;
+      if(pi>=1){ pi=1; mu=1/Math.max(Wq,1e-12); }
+    }
+    return {mu,pi};
+  };
+  const wL=cal(P.tauLLM,cL,s.X,WLq);
+  const wD=cal(P.tauDB,cD,s.X,WDq);
+  return Object.assign(s,{RL,RD,WLq,WDq,corrL,corrD,wL,wD,T:P.tauThink+RL+RD,
+                          saturated:(s.rhoL>=0.9995||s.rhoD>=0.9995)});
+}
+
+/* Latency distribution (per-bin masses on a uniform grid):
+   latency = T0(τL+τD) + ExpThink ⊛ WaitMixLLM ⊛ WaitMixDB */
+function latencyDistribution(P, sol, gridN, horizonMult){
+  const meanLat=P.tauThink+sol.RL+sol.RD;
+  const horizon=horizonMult*Math.max(meanLat,1e-6);
+  const dx=horizon/(gridN-1);
+  const T0=P.tauLLM+P.tauDB;
+  const dEx=m=>1-Math.exp(-m*dx);
+  const fT=new Float64Array(gridN);
+  if(P.tauThink>1e-9){
+    const rT=1/P.tauThink;
+    for(let i=0;i<gridN;i++) fT[i]=Math.exp(-rT*i*dx)*dEx(rT);
+  } else fT[0]=1;
+  const mkWait=w=>{
+    const f=new Float64Array(gridN);
+    f[0]=(1-w.pi)+w.pi*dEx(w.mu);                      // no-wait delta + [0,dx) tail mass
+    for(let i=1;i<gridN;i++) f[i]=w.pi*Math.exp(-w.mu*i*dx)*dEx(w.mu);
+    return f;
+  };
+  const convF=(a,b)=>{
+    const n=a.length, out=new Float64Array(n);
+    for(let i=0;i<n;i++){
+      const ai=a[i]; if(ai===0) continue;
+      for(let j=0;j<n-i;j++) out[i+j]+=ai*b[j];
+    }
+    return out;
+  };
+  let f=convF(mkWait(sol.wL),mkWait(sol.wD));
+  f=convF(fT,f);
+  const cdf=new Float64Array(gridN);
+  let acc=0;
+  for(let i=0;i<gridN;i++){ acc+=f[i]; cdf[i]=acc; }
+  const M=acc||1;
+  const pct=p=>{
+    const tg=p*M;
+    if(cdf[gridN-1]<tg) return Infinity;
+    let lo=0,hi=gridN-1;
+    while(lo<hi){ const mid=(lo+hi)>>1; if(cdf[mid]<tg) lo=mid+1; else hi=mid; }
+    if(lo===0) return (tg/cdf[0])*dx + T0;            // percentile inside first bin
+    const i=Math.max(1,lo), c0=cdf[i-1], c1=cdf[i];
+    return ((i-1)+((c1>c0)?(tg-c0)/(c1-c0):0))*dx + T0;
+  };
+  let m=0,m2=0;
+  for(let i=0;i<gridN;i++){ m+=i*dx*f[i]; m2+=i*dx*i*dx*f[i]; }
+  m=m/M+T0; m2=m2/M;
+  return {p50:pct(.5),p90:pct(.9),p95:pct(.95),p99:pct(.99),
+          mean:m, sd:Math.sqrt(Math.max(0,m2-m*m)),
+          f:Array.from(f), cdf, M, dx, horizon, gridN, T0};
+}
+
+/* ---------- Monte Carlo: FCFS discrete-event simulation of the closed loop ---------- */
+/* Correct M/G/c semantics with FIFO queues; agents as a state machine. */
+function mcSim(P, nKeep, warmFrac, seed){
+  const N=Math.round(P.N), cL=Math.round(P.cLLM), cD=Math.round(P.cDB);
+  const nTotal=Math.max(Math.round(nKeep/(1-Math.min(warmFrac,0.9))),nKeep);
+  const skip=nTotal-nKeep;
+  const rng=mulberry32(seed>>>0);
+  const sT=makeSampler(Math.max(P.tauThink,0),1,rng);
+  const sL=makeSampler(P.tauLLM,P.csLLM,rng);
+  const sD=makeSampler(P.tauDB,P.csDB,rng);
+
+  /* agent phases: 0 think,1 in LLQ,2 LLM busy,3 in DBQ,4 DB busy */
+  const phase=new Int8Array(N);
+  const wake=new Float64Array(N);
+  const dT=new Float64Array(N);
+  const arrL=new Float64Array(N), arrD=new Float64Array(N);
+  const wLat=new Float64Array(N), wDat=new Float64Array(N), sojL=new Float64Array(N);
+  for(let i=0;i<N;i++){ phase[i]=0; wake[i]=sT(); }   // initial think from t=0
+
+  const qL=[], qD=[];
+  let busyL=0, busyD=0, busyClkL=0, busyClkD=0;
+  let now=0, completed=0, kept=0, lastComp=0;
+  let firstCycleStart=Infinity, firstComp=Infinity;
+  const latA=new Float64Array(nKeep), wLA=new Float64Array(nKeep), wDA=new Float64Array(nKeep);
+  let guard=0, maxIter=nTotal*6+20000;
+
+  const dispatchL=()=>{
+    while(busyL<cL && qL.length){
+      const a=qL.shift();
+      wLat[a]=now-arrL[a];
+      const s=sL();
+      busyL++; busyClkL+=s;
+      phase[a]=2; wake[a]=now+s;
+    }
+  };
+  const dispatchD=()=>{
+    while(busyD<cD && qD.length){
+      const a=qD.shift();
+      wDat[a]=now-arrD[a];
+      const s=sD();
+      busyD++; busyClkD+=s;
+      phase[a]=4; wake[a]=now+s;
+    }
+  };
+
+  while(kept<nKeep){
+    if(guard++>maxIter) return {ok:false};
+    let a=-1;
+    for(let i=0;i<N;i++)
+      if((phase[i]===0||phase[i]===2||phase[i]===4)&&(a<0||wake[i]<wake[a])) a=i;
+    if(a<0) break;
+    now=wake[a];
+    const ph=phase[a];
+    if(ph===0){                       // think done → enter LLM queue
+      arrL[a]=now; phase[a]=1; wake[a]=Infinity;
+      qL.push(a); dispatchL();
+    } else if(ph===2){                // LLM done → dispatch LLM → enter DB queue
+      busyL--; sojL[a]=now-arrL[a]; dispatchL();
+      arrD[a]=now; phase[a]=3; wake[a]=Infinity;
+      qD.push(a); dispatchD();
+    } else {                          // DB done → record cycle → think again
+      busyD--; dispatchD();
+      completed++;
+      if(completed>skip){
+        wLA[kept]=wLat[a]; wDA[kept]=wDat[a];
+        latA[kept]=dT[a]+sojL[a]+(now-arrD[a]);
+        if(kept===0){ firstComp=now; firstCycleStart=arrL[a]-dT[a]; }
+        lastComp=now;
+        kept++;
+      }
+      const s=sT(); dT[a]=s; phase[a]=0; wake[a]=now+s;
+    }
+  }
+  if(kept<nKeep) return {ok:false};
+  return {ok:true, lat:latA, wl:wLA, wd:wDA, kept:kept,
+          X:(kept-1)/Math.max(1e-9,(lastComp-firstComp)),
+          rhoL:busyClkL/(cL*lastComp), rhoD:busyClkD/(cD*lastComp),
+          window:(lastComp-firstCycleStart)};
+}
+
+/* percentile helper on a Float64Array (sorted copy) */
+function mcStats(arr){
+  const n=arr.length, s=Float64Array.from(arr).sort();
+  const q=p=>{
+    const idx=p*(n-1), lo=Math.floor(idx), hi=Math.min(n-1,lo+1);
+    return s[lo]+(s[hi]-s[lo])*(idx-lo);
+  };
+  let m=0; for(const v of arr) m+=v; m/=n;
+  let v2=0; for(const w of arr) v2+=(w-m)*(w-m);
+  return {p50:q(.5),p90:q(.9),p95:q(.95),p99:q(.99),mean:m,sd:Math.sqrt(v2/n),sorted:s};
+}
+
+
+/* node export guard (browser ignores this) */
+if(typeof module!=='undefined' && module.exports){
+  module.exports={mulberry32,gamma1,makeSampler,erlangB,erlangC,logfact,mmcfLog,isfLog,
+    normExp,convArr,solveClosedChain,solve,latencyDistribution,mcSim,mcStats};
+}
+
+/*MATHCORE-END*/
+</script>
+<script>
+/* Analyzer UI: reads params, drives the math core, renders tiles/charts/tables. */
+'use strict';
+const $=id=>document.getElementById(id);
+let MODE='A';                 // 'A' analytic | 'M' monte carlo | 'C' compare
+let A=null;                   // {P,num,sol,dist}
+let MC=null;                  // {P,mcSeed,mcN,mcWarm,res,stats,empWL,empWD}
+const f2=v=> isFinite(v)? v.toFixed(2) : '∞';
+const f3=v=> isFinite(v)? v.toFixed(3) : '∞';
+
+function readParams(){
+  const P={
+    N:        Math.max(1, Math.round(+$('N').value||1)),
+    tauThink: Math.max(0, +$('tauThink').value||0),
+    tauLLM:   Math.max(1e-3, +$('tauLLM').value||1e-3),
+    cLLM:     Math.max(1, Math.round(+$('cLLM').value||1)),
+    csLLM:    Math.max(0,  +$('csLLM').value||0),
+    tauDB:    Math.max(1e-3, +$('tauDB').value||1e-3),
+    cDB:      Math.max(1, Math.round(+$('cDB').value||1)),
+    csDB:     Math.max(0,  +$('csDB').value||0)
+  };
+  const num={
+    gridN:   Math.max(256,  Math.min(8192, Math.round(+$('gridN').value||2048))),
+    horizon: Math.max(4,    Math.min(40,   Math.round(+$('horizon').value||12))),
+    sweepMax:Math.max(10,   Math.min(300,  Math.round(+$('sweepMax').value||120)))
+  };
+  const mcSet={
+    mcN:    Math.max(500,    Math.min(200000, Math.round(+$('mcN').value||20000))),
+    mcWarm: Math.max(0,      Math.min(0.5,    +$('mcWarm').value||0)),
+    mcSeed: Math.max(0,      Math.round(+$('mcSeed').value||0))
+  };
+  return {P,num,mcSet};
+}
+
+function banner(cls,text){
+  const b=$('banner');
+  if(!cls){ b.className='banner'; b.textContent=''; return; }
+  b.className='banner show '+cls;
+  b.textContent=text;
+}
+
+/* ---------------- analytic ---------------- */
+function computeAnalytic(){
+  const {P,num}=readParams();
+  const sol=solve(P);
+  A={P,num,sol,dist:null};
+  if(!sol.ok){
+    banner('bad','Solver failed — check parameters.');
+    setTiles(); drawLat(); drawTable(); drawSweep(); return;
+  }
+  A.dist=latencyDistribution(P,sol,num.gridN,num.horizon);
+  const rho=Math.max(sol.rhoL,sol.rhoD);
+  if(rho>=0.995){
+    banner('bad','Near saturation: ρ='+rho.toFixed(3)+' — latencies grow steeply with N.');
+  } else if(rho>=0.9){
+    banner('warn','Approaching saturation: ρ='+rho.toFixed(3)+' (knee nearby).');
+  } else if(A.dist.M<0.985){
+    banner('warn','Grid captured '+(A.dist.M*100).toFixed(1)+'% of PDF mass — raise the horizon.');
+  } else {
+    banner('ok','Exact closed-chain solve (product form; cross-checked vs a brute-force CTMC).');
+  }
+  setTiles(); drawLat(); drawTable(); drawSweep();
+}
+
+/* ---------------- monte carlo ---------------- */
+function mcState(){
+  const mcSet=readParams().mcSet;
+  return mcSet;
+}
+function mcStale(){
+  if(!MC) return true;
+  const {P,mcSet}=readParams();
+  return JSON.stringify(P)!==JSON.stringify(MC.P) ||
+         JSON.stringify(mcSet)!==JSON.stringify({mcN:MC.mcN,mcWarm:MC.mcWarm,mcSeed:MC.mcSeed});
+}
+function runMC(){
+  const {P,mcSet}=readParams();
+  const btn=$('recompute');
+  btn.textContent='Running Monte Carlo…'; btn.disabled=true;
+  setTimeout(()=>{
+    const seed = mcSet.mcSeed===0 ? (Date.now()>>>0) : mcSet.mcSeed;
+    const res=mcSim(P, mcSet.mcN, mcSet.mcWarm, seed);
+    if(res&&res.ok&&res.kept>1){
+      const stats=mcStats(res.lat);
+      let eh=0,ed=0;
+      for(const w of res.wl) if(w>0) eh++;
+      for(const w of res.wd) if(w>0) ed++;
+      MC={P, mcN:mcSet.mcN, mcWarm:mcSet.mcWarm, mcSeed:mcSet.mcSeed,
+          res, stats, empWL:eh/res.kept, empWD:ed/res.kept, seedUsed:seed};
+    } else {
+      MC=null; banner('bad','Monte Carlo failed — reduce cycles or check parameters.');
+    }
+    btn.textContent='Recompute (incl. Monte Carlo)'; btn.disabled=false;
+    setTiles(); drawLat(); drawTable();
+  },20);
+}
+
+/* ---------------- tiles ---------------- */
+function setMC(idMain,mcVal,anaVal,unit){
+  setMC.$(idMain).textContent=mcVal;
+  setMC.$('a_'+idMain.slice(2)).textContent=anaVal;
+}
+function setMCBind(){ setMC.$=$; }
+
+function setTiles(){
+  const S=A&&A.sol, D=A&&A.dist;
+  const mcOn=(MODE!=='A')&&(!!MC);
+  const R=mcOn? MC.res:null, ST=mcOn? MC.stats:null;
+  const put=id=>obj=>{
+    $( id ).textContent=obj.v;
+    $('a_'+id.slice(2)).textContent=obj.a||'';
+  };
+  document.querySelectorAll('.tile').forEach(t=>t.classList.toggle('mcmode',MODE==='M'));
+  if(!S){ put('t_p50')({v:'—'}); put('t_p90')({v:'—'}); put('t_p95')({v:'—'});
+          put('t_p99')({v:'—'}); put('t_mean')({v:'—'}); put('t_x')({v:'—'});
+          put('t_rho')({v:'—'}); put('t_pwait')({v:'—'});
+          return; }
+  if(MODE==='M'){
+    if(!MC){
+      put('t_p50')({v:'—',a:'press Recompute to run MC'});
+      put('t_p90')({v:'—'}); put('t_p95')({v:'—'}); put('t_p99')({v:'—'});
+      put('t_mean')({v:'—'}); put('t_x')({v:'—'}); put('t_rho')({v:'—'}); put('t_pwait')({v:'—'});
+      return;
+    }
+    put('t_p50')({v:f2(ST.p50)+' s', a:'analytic '+(D?f2(D.p50)+' s':'—')});
+    put('t_p90')({v:f2(ST.p90)+' s', a:'analytic '+(D?f2(D.p90)+' s':'—')});
+    put('t_p95')({v:f2(ST.p95)+' s', a:'analytic '+(D?f2(D.p95)+' s':'—')});
+    put('t_p99')({v:f2(ST.p99)+' s', a:'analytic '+(D?f2(D.p99)+' s':'—')});
+    put('t_mean')({v:f2(ST.mean)+'±'+f2(ST.sd), a:'analytic '+(D?f2(D.mean)+'±'+f2(D.sd):'—')});
+    put('t_x')({v:f3(R.X)+' /s', a:'analytic '+f3(S.X)+' /s'});
+    put('t_rho')({v:R.rhoL.toFixed(2)+' / '+R.rhoD.toFixed(2),
+                  a:'analytic '+S.rhoL.toFixed(2)+' / '+S.rhoD.toFixed(2)});
+    put('t_pwait')({v:(MC.empWL*100).toFixed(0)+'% / '+(MC.empWD*100).toFixed(0)+'%',
+                    a:'analytic '+(S.wL.pi*100).toFixed(0)+'% / '+(S.wD.pi*100).toFixed(0)+'%'});
+    $('latNote').textContent='Monte Carlo (seed '+MC.seedUsed+', n='+MC.res.kept+' kept cycles): empirical PDF/CDF; error O(1/√n).';
+  } else {
+    put('t_p50')({v:f2(D.p50)+' s', a:mcOn?'MC '+f2(ST.p50)+' s':''});
+    put('t_p90')({v:f2(D.p90)+' s', a:mcOn?'MC '+f2(ST.p90)+' s':''});
+    put('t_p95')({v:f2(D.p95)+' s', a:mcOn?'MC '+f2(ST.p95)+' s':''});
+    put('t_p99')({v:f2(D.p99)+' s', a:mcOn?'MC '+f2(ST.p99)+' s':''});
+    put('t_mean')({v:f2(D.mean)+'±'+f2(D.sd), a:mcOn?('MC '+f2(ST.mean)+'±'+f2(ST.sd)):''});
+    put('t_x')({v:f3(S.X)+' /s', a:mcOn?('MC '+f3(R.X)+' /s'):''});
+    put('t_rho')({v:S.rhoL.toFixed(2)+' / '+S.rhoD.toFixed(2), a:mcOn?('MC '+R.rhoL.toFixed(2)+' / '+R.rhoD.toFixed(2)):''});
+    put('t_pwait')({v:(S.wL.pi*100).toFixed(0)+'% / '+(S.wD.pi*100).toFixed(0)+'%',
+                    a:mcOn?('MC '+(MC.empWL*100).toFixed(0)+'% / '+(MC.empWD*100).toFixed(0)+'%'):''});
+    $('latNote').textContent='Analytic engine: closed-chain exact means + calibrated wait mixture (±10–15% vs MC).';
+  }
+}
+
+/* ---------------- charts (SVG strings) ---------------- */
+function svgBox(W,H){
+  return {
+    W,H,x0:54,x1:W-16,y0:14,y1:H-30,parts:[],
+    line(x1,y1,x2,y2,stroke,w,dash){this.parts.push('<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2
+      +'" stroke="'+stroke+'" stroke-width="'+(w||1)+'"'+(dash?' stroke-dasharray="'+dash+'"':'')+'/>');},
+    text(s,x,y,fill,size,anchor){this.parts.push('<text x="'+x+'" y="'+y+'" fill="'+fill
+      +'" font-size="'+(size||10.5)+'" font-family="ui-monospace,Menlo,monospace" text-anchor="'+(anchor||'middle')+'">'+s+'</text>');},
+    path(d,stroke,w,dash,fill){this.parts.push('<path d="'+d+'" fill="'+(fill||'none')
+      +'" stroke="'+(stroke||'none')+'" stroke-width="'+(w||1)+'"'+(dash?' stroke-dasharray="'+dash+'"':'')+'/>');},
+    circle(x,y,r,fill){this.parts.push('<circle cx="'+x+'" cy="'+y+'" r="'+r+'" fill="'+fill+'"/>');},
+    out(){return '<svg viewBox="0 0 '+this.W+' '+this.H+'">'+this.parts.join('')+'</svg>';}
+  };
+}
+const px=(c,t,tMax)=>c.x0+(t/tMax)*(c.x1-c.x0);
+const py=(c,v)=>c.y1-v*(c.y1-c.y0);
+
+function markPercentiles(c,tMax,ps){
+  const cols={p50:'var(--warn)',p90:'var(--warn)',p95:'var(--warn)',p99:'var(--bad)'};
+  ps.forEach(p=>{
+    if(!isFinite(p.t)||p.t<=0||p.t>tMax) return;
+    const X=px(c,p.t,tMax);
+    c.line(X,py(c,0),X,py(c,1),cols[p.lab]||'var(--warn)',1,'3 4');
+    c.text(p.lab,X+3,c.y0+12,cols[p.lab]||'var(--warn)',10,'start');
+  });
+}
+
+function drawLat(){
+  const box=$('chartLat'); box.innerHTML='';
+  if(!A||!A.sol) return;
+  const S=A.sol, D=A.dist;
+  const useMC=(MODE!=='A')&&MC;
+  const mcP99=useMC?MC.stats.p99:0;
+  const tMax=Math.max(1e-3, Math.min(D.horizon, Math.max(
+    mcP99*1.08,
+    isFinite(D.p99)? D.p99*1.12 : 0,
+    D.mean*3)));
+  const c=svgBox(880,320);
+  for(let i=0;i<=4;i++) c.line(c.x0,c.y0+i*(c.y1-c.y0)/4,c.x1,c.y0+i*(c.y1-c.y0)/4,'var(--grid)',1);
+  for(let i=0;i<=4;i++) c.text((tMax*i/4).toFixed(1)+'s',px(c,tMax*i/4,tMax),c.H-12,'var(--muted)');
+  for(let i=0;i<=4;i++) c.text((i*25)+'%',c.x0-6,py(c,i/4)+4,'var(--muted)',10.5,'end');
+  if(!useMC||MODE==='C'){
+    const dx=D.dx, n=D.gridN;
+    let fmax=1e-30; for(let i=0;i<n;i++) if(D.f[i]>fmax) fmax=D.f[i];
+    let dC='', dP='', first=true, dpFirst=true;
+    for(let i=0;i<n;i++){
+      const t=i*dx; if(t>tMax) break;
+      const X=px(c,t,tMax).toFixed(1);
+      const Yc=py(c,D.cdf[i]/D.M).toFixed(1);
+      const Yp=py(c,(D.f[i]/fmax)*0.55).toFixed(1);
+      dC+=(first?'M':' L')+X+','+Yc; first=false;
+      dP+=(dpFirst?'M':' L')+X+','+Yp; dpFirst=false;
+    }
+    c.path(dP+' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,0)+' L'+px(c,0,tMax).toFixed(1)+','+py(c,0)+' Z','none',0,null,'rgba(90,169,230,.25)');
+    c.path(dC,'var(--accent)',2);
+    markPercentiles(c,tMax,[{t:D.p50,lab:'p50'},{t:D.p90,lab:'p90'},{t:D.p95,lab:'p95'},{t:D.p99,lab:'p99'}]);
+  }
+  if(useMC){
+    const sorted=MC.stats.sorted, n=sorted.length, nb=80, w=tMax/nb;
+    const hist=new Array(nb).fill(0);
+    for(let i=0;i<n;i++){ const b=Math.min(nb-1,Math.floor(sorted[i]/w)); hist[b]++; }
+    let hmax=1e-30; for(const h of hist) hmax=Math.max(hmax,h/n/w);
+    let dH='',first=true;
+    for(let b=0;b<nb;b++){
+      const y=py(c,(hist[b]/n/w/hmax)*0.55);
+      dH+=(first?'M':' L')+px(c,b*w,tMax).toFixed(1)+','+y.toFixed(1)+' L'+px(c,(b+1)*w,tMax).toFixed(1)+','+y.toFixed(1);
+      first=false;
+    }
+    c.path(dH+' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,0)+' L'+px(c,0,tMax).toFixed(1)+','+py(c,0)+' Z','none',0,null,'rgba(76,195,138,.22)');
+    let dE='',first2=true;
+    for(let i=0;i<n;i+=Math.max(1,Math.floor(n/400))){
+      const t=Math.min(sorted[i],tMax);
+      dE+=(first2?'M':' L')+px(c,t,tMax).toFixed(1)+','+py(c,(i+1)/n).toFixed(1); first2=false;
+    }
+    dE+=' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,1).toFixed(1);
+    c.path(dE,'var(--mcc)',2);
+    if(MODE==='M') markPercentiles(c,tMax,[{t:MC.stats.p50,lab:'p50'},{t:MC.stats.p90,lab:'p90'},{t:MC.stats.p95,lab:'p95'},{t:MC.stats.p99,lab:'p99'}]);
+  }
+  $('legAnalytic').style.display=(!useMC||MODE==='C')?'inline':'none';
+  $('legMc').style.display=useMC?'inline':'none';
+  box.innerHTML=c.out();
+}
+
+function drawSweep(){
+  const box=$('chartSweep'); box.innerHTML='';
+  if(!A||!A.sol) return;
+  const pts=[];
+  for(let k=1;k<=Math.min(A.num.sweepMax,300);k++){
+    const s=solve(Object.assign({},A.P,{N:k}));
+    if(!s.ok) break;
+    pts.push({N:k,T:s.T,sat:Math.max(s.rhoL,s.rhoD)>=0.995});
+    if(!isFinite(s.T)||s.T>Math.max(80*A.sol.T,1e4)) break;
+  }
+  if(pts.length<3) return;
+  let knee=null,best=0;
+  for(let i=1;i<pts.length-1;i++){
+    const sl=pts[i+1].T-pts[i].T;
+    if(sl>best+1e-9){ best=sl; knee=pts[i]; }
+  }
+  const Tmax=Math.max.apply(null,pts.map(p=>p.T))*1.06;
+  const Nmax=Math.max.apply(null,pts.map(p=>p.N));
+  const c=svgBox(880,300);
+  for(let i=0;i<=4;i++) c.line(c.x0,c.y0+i*(c.y1-c.y0)/4,c.x1,c.y0+i*(c.y1-c.y0)/4,'var(--grid)',1);
+  [0,0.5,1].forEach(v=>c.text((Tmax*v).toFixed(1)+'s',c.x0-4,py(c,v*Tmax)+4,'var(--muted)',10.5,'end'));
+  let d='';
+  pts.forEach((p,i)=>{ d+=(i?' L':'M')+px(c,p.N,Nmax).toFixed(1)+','+py(c,p.T,Tmax).toFixed(1); });
+  c.path(d,'var(--accent)',2);
+  pts.filter(p=>p.sat).forEach(p=>c.line(px(c,p.N,Nmax),py(c,0),px(c,p.N,Nmax),py(c,1),'var(--bad)',2));
+  if(knee){
+    const X=px(c,knee.N,Nmax), Y=py(c,knee.T,Tmax);
+    c.circle(X,Y,4.5,'var(--warn)');
+    c.text('knee N='+knee.N,X,Y-10,'var(--warn)',10);
+  }
+  for(let i=0;i<=4;i++){ const nv=Math.round(Nmax*i/4); c.text(''+nv,px(c,nv,Nmax),c.H-12,'var(--muted)'); }
+  c.text('N agents',c.x1-2,c.H-2,'var(--muted)',10,'end');
+  box.innerHTML=c.out();
+}
+
+/* ---------------- per-station table ---------------- */
+function drawTable(){
+  const S=A&&A.sol, h=$('tblh'), b=$('tblb');
+  if(!S){ h.innerHTML=''; b.innerHTML=''; return; }
+  const mcOn=(MODE!=='A')&&MC;
+  h.innerHTML='<tr><th>station</th><th>λ=X</th><th>ρ/server</th><th>P(wait&gt;0)</th><th>Wq</th><th>R=τ+Wq</th><th>Lq</th>'
+    +(mcOn?'<th>MC Wq</th><th>MC P(wait)</th>':'')+'</tr>';
+  function row(name,tau,pi,Wq,rho){
+    return '<tr><td>'+name+'</td><td>'+f3(S.X)+'</td><td>'+rho.toFixed(3)+'</td><td>'
+      +(pi*100).toFixed(0)+'%</td><td>'+f2(Wq)+' s</td><td>'+f2(tau+Wq)+' s</td><td>'+f3(S.X*Wq)+'</td>'
+      +(mcOn? '<td>'+f2(name==='LLM'?MC.mwl:MC.mwd)+' s</td><td>'+((name==='LLM'?MC.empWL:MC.empWD)*100).toFixed(0)+'%</td>':'')
+      +'</tr>';
+  }
+  if(mcOn){
+    let sa=0,sb=0;
+    for(const w of MC.res.wl) sa+=w;
+    for(const w of MC.res.wd) sb+=w;
+    MC.mwl=sa/MC.res.kept; MC.mwd=sb/MC.res.kept;
+  }
+  b.innerHTML=row('LLM',A.P.tauLLM,S.wL.pi,S.WLq,S.rhoL)+row('DB',A.P.tauDB,S.wD.pi,S.WDq,S.rhoD);
+}
+
+/* ---------------- orchestration ---------------- */
+let deb=null;
+function schedule(){
+  clearTimeout(deb);
+  deb=setTimeout(()=>{
+    computeAnalytic();
+    if(MODE!=='A'&&mcStale()) banner('warn','Parameters changed — press Recompute to refresh the Monte Carlo.');
+  },150);
+}
+function computeAll(){
+  computeAnalytic();
+  if(MODE!=='A') runMC(); else setTiles();
+}
+function setTab(m){
+  MODE=m;
+  ['tabA','tabM','tabC'].forEach((x,i)=>$(x).classList.toggle('on',['A','M','C'][i]===m));
+  computeAnalytic();
+  if(m!=='A'&&(mcStale()||!MC)) runMC();
+  else{ setTiles(); drawLat(); drawTable(); }
+}
+function init(){
+  $('tabA').addEventListener('click',()=>setTab('A'));
+  $('tabM').addEventListener('click',()=>setTab('M'));
+  $('tabC').addEventListener('click',()=>setTab('C'));
+  document.querySelectorAll('input[type=number],input[type=range]').forEach(inp=>{
+    inp.addEventListener('input',()=>{
+      const id=inp.id;
+      if(id&&id.endsWith('_s')){
+        const tgt=$(''+id.slice(0,-2));
+        if(tgt) tgt.value=inp.value;
+      }
+      schedule();
+    });
+  });
+  $('recompute').addEventListener('click',computeAll);
+  computeAnalytic();
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init);
+else init();
+
+</script>
+</body>
+</html>

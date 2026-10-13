@@ -123,7 +123,10 @@ function solve(P){
   const WLq=Math.max(0,RL-P.tauLLM)*corrL;
   const WDq=Math.max(0,RD-P.tauDB)*corrD;
   const cal=(tau,c,X,Wq)=>{
-    let mu=c/tau - X, pi;
+    /* closed-chain calibration: a waiting agent sees all c servers busy, so the
+       wait tail is Exp(c/τ) (validated empirically vs MC bake-off); π̂ rescaled
+       so the mixture mean still equals the exact chain mean wait. */
+    let mu=c/tau, pi;
     if(mu<=1e-12){ pi=1; mu=Wq>0?1/Wq:1e6; }
     else{
       pi=mu*Wq;
@@ -175,6 +178,7 @@ function latencyDistribution(P, sol, gridN, horizonMult){
     if(cdf[gridN-1]<tg) return Infinity;
     let lo=0,hi=gridN-1;
     while(lo<hi){ const mid=(lo+hi)>>1; if(cdf[mid]<tg) lo=mid+1; else hi=mid; }
+    if(lo===0) return (tg/cdf[0])*dx + T0;            // percentile inside first bin
     const i=Math.max(1,lo), c0=cdf[i-1], c1=cdf[i];
     return ((i-1)+((c1>c0)?(tg-c0)/(c1-c0):0))*dx + T0;
   };
@@ -278,9 +282,9 @@ function mcStats(arr){
   return {p50:q(.5),p90:q(.9),p95:q(.95),p99:q(.99),mean:m,sd:Math.sqrt(v2/n),sorted:s};
 }
 
+/*MATHCORE-END*/
 /* node export guard (browser ignores this) */
 if(typeof module!=='undefined' && module.exports){
-/*MATHCORE-END*/
   module.exports={mulberry32,gamma1,makeSampler,erlangB,erlangC,logfact,mmcfLog,isfLog,
     normExp,convArr,solveClosedChain,solve,latencyDistribution,mcSim,mcStats};
 }

@@ -17,9 +17,11 @@ throughput, utilizations, queue depths, and the **latency distribution**
 
 | File | Purpose |
 |---|---|
-| `core.js` | The math engine (dependency-free JS, runs in browser *and* node). |
-| `verify_core.js` | Verification suite (`node verify_core.js`) — asserts against independent ground truth. |
-| `agent_db_sim_analyzer.html` | The self-contained webpage **(being regenerated — see caveats)**. |
+| `agent_db_sim_analyzer.html` | **The webpage** — single self-contained file (analytic + Monte Carlo + compare). Open it in any browser; no server, no network. |
+| `core.js` | The math engine (dependency-free JS, runs in browser *and* node). The same code is embedded in the webpage between `MATHCORE` markers. |
+| `verify_core.js` | Verification suite (`node analysis/verify_core.js`) — 27 checks against independent ground truth. |
+| `smoke_page.js` | Headless regression test (`node analysis/smoke_page.js`) — runs the page's scripts in a DOM shim. |
+| `README.md` | This guide. |
 
 ## Quick start
 
@@ -77,28 +79,28 @@ saturation sweep (mean latency vs. N with knee marker); per-station table
 
 ## Caveats — what is verified and what is NOT (please read)
 
-**Verified** (node suite, 30 checks):
+**Verified** (node suite, 27 checks + headless page smoke test):
 - Exact means cross-checked against a brute-force CTMC stationary solve (independent method)
   to 1e-6 on several configs (N=1..8, servers 1..4, with/without think node).
 - Closed M/M/1//2 chain against the textbook hand-analysis: X = 2/3, L = 1 per node.
-- MC engine vs. exact chain: <1% agreement on means at SCV=1 (3-seed average).
+- MC engine vs. exact chain: <1% agreement on means and <1% on throughput at SCV=1 (seeded, reproducible).
 - Gamma/Exp samplers: mean/variance within statistical tolerance at SCV ∈ {0.5, 1, 2.5}.
 - Percentile engine internal consistency: grid mean ≈ chain mean (≤1%).
+- Headless smoke test (`node analysis/smoke_page.js`): page scripts run end-to-end
+  (analytic tiles, MC tiles, table build) via the extracted core in a DOM shim.
 
-**Known approximations / open issues:**
-1. **Percentile calibration** (open): the wait mixture matches the *mean* wait exactly, but its
-   P(wait>0) is an open-chain (Poisson) imputation — MC shows the closed-chain empirical value is
-   higher (0.30 vs 0.11 at defaults). Percentiles from the analytic engine should be read as
-   ±10–15% vs the MC empirical values; a better closed-chain calibration is being fitted
-   (calibration `μ = c/τ` currently wins the empirical bake-off but is anti-conservative at high load).
-2. **Percentile engine bug (open)**: in the `τ_think = 0` regime the analytic p50 can come out
-   below the theoretical floor T0 = τ_LLM + τ_DB (impossible) — the grid engine mishandles the
-   delta-think path. Fix in progress; until then treat zero-think percentiles as invalid
-   (MC tab is correct for that regime).
-3. **Deterministic think time**: the engine assumes exponential think; a deterministic-think
-   toggle is not implemented yet (MC could do it; analytic would use a delay-node approximation).
-4. **Token-rate cap** (README roadmap: DB service extended by tokens/rate) not yet exposed as a parameter.
-5. **Saturation**: closed chains are stable for finite N, so ρ < 1 always; "saturation" is reported
-   as near-saturation (ρ ≥ 0.995) with diverging latency growth instead of a hard cap.
-6. The webpage itself is being reassembled from the verified `core.js` in the next commit
-   (an earlier broken intermediate was removed rather than committed).
+**Known approximations / remaining caveats:**
+1. **Percentile calibration** (chosen empirically, documented): the wait mixture reproduces the
+   exact closed-chain mean wait; its tail rate is μ̂ = c/τ (a waiting agent sees all c servers
+   busy — closed-chain behaviour), validated vs MC in a bake-off (defaults and near-saturation
+   and zero-think regimes all improve over the open-chain alternative). E.g. at defaults
+   p50/p95/p99: analytic 3.36/7.97/11.19 s vs MC 3.42/8.87/12.25 s. Expect ~±10–15% on upper
+   percentiles; use the MC tab for empirical values. P(wait>0) remains an approximation
+   (analytic 0.47 vs MC 0.30 at defaults).
+2. **Deterministic think time**: the engine assumes exponential think; a deterministic-think
+   toggle is not implemented yet (MC could support it; analytic would use a delay-node approximation).
+3. **Token-rate cap** (roadmap: DB service extended by tokens/rate) not yet exposed as a parameter.
+4. **Saturation**: closed chains are stable for finite N, so ρ < 1 always; ρ ≥ 0.995 is flagged
+   as near-saturation with steep latency growth rather than a hard cap.
+5. **Sweep chart scope**: the saturation sweep uses the analytic engine only; MC percentiles
+   appear in tiles, the latency chart and the station table.

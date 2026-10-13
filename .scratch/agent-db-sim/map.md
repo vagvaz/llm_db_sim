@@ -33,6 +33,7 @@ A working simulation platform in this repo: a SimPy-based discrete-event simulat
 - [09 — LLMEndpoint](issues/09-task-llm-endpoint.md): two-phase input/output token service; slots + fair-shared aggregate token cap; submit/wait/response_of API; 16 tests.
 - [11 — Metrics collector](issues/11-task-metrics-collector.md): batched SQLite TraceWriter; derived percentile/utilization/token-rate/hybrid-attribution tables at collect_run(); 13 tests.
 - [10 — DBEndpoint](issues/10-task-db-endpoint.md): three topologies + scale-out; compute-wrapped storage round-trip (issue_ratio split); StorageBackend presets with ceilings; coordinators with overhead multiplier; build_model DB portion; 20 tests. Full suite 101 green.
+- [12 — VCD + viz server + reports](issues/12-task-viz-server.md): pyvcd event-driven writer with safe-tail; FastAPI+SSE live server with vendored d3-wave; Jinja2+Plotly auto-indexed reports; serve/render CLI; 23 tests, suite 124 green.
 - [06 — Project skeleton](issues/06-task-skeleton-cli-config.md): Python 3.10, typer+OmegaConf skeleton with smoke scenario; tests pass.
 - [07 — simkit kernel](issues/07-task-simkit-kernel.md): Component lifecycle (construct→elaborate→start→collect) + named RNG streams; typed ports validated at elaboration; ingress (none/fifo/priority) → SlotServer (slot pool, cost_fn, shared aggregate token cap) with queue/service records; Container BandwidthPool; sweep runner `run_sweep` + CLI `sweep` writes run dirs; ProbeSink API + in-memory sink; `build_model` stub; 40 tests pass.
 

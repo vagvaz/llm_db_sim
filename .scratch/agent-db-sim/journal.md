@@ -35,3 +35,7 @@ Chronological log of orchestration decisions and stage completions. Tickets hold
 **Stage 1 complete (components).** Tickets 08–11 all landed, committed (`296a2b1`, `0ccb9d1`, `08686e7`, `a4335b0`), map indexed, suite 101 green. Loop attempt 1 successful.
 
 **Stage 2 dispatched (viz stack).** Ticket 12 → fix-6 (reused): VCD writer + FastAPI/SSE/d3-wave live server + Jinja2/Plotly reports on fixtures; integration with build_model (agent/LLM stub wiring) deferred to ticket 13.
+
+**12 task (resolved).** Viz stack: viz/{vcd,server,report,fixture}.py; vendored d3-wave/plotly static assets (offline-first); SSE init/delta/keepalive/done with safe-tail; serve/render CLI; fixture factory for standalone tests. 23 tests; suite 124 green. fix-6. Committed `3061e3b`.
+
+**Stage 3 dispatched (integration + acceptance).** Ticket 13 → fix-5 (reused, owns build_model): full agent/LLM/DB wiring, run dir pipeline (metrics.db + run.vcd + report), topology sweep acceptance demo.

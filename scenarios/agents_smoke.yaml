@@ -1,0 +1,48 @@
+# agents_smoke.yaml — the AgentClient config contract (ticket 08).
+# NOTE: end-to-end execution lands with the build_model wiring (ticket 10;
+# llm:/db: sections + topology). Today this file documents and locks the
+# agents: namespace that other tickets build scenarios against.
+#
+# Config namespace (all keys required, validated fail-fast at construct):
+#   agents.count           number of closed-loop agents
+#   agents.input_tokens    prompt-size draw;  {distribution, params} or bare int
+#   agents.output_tokens   response-size draw; {distribution, params} or bare int
+#   agents.query_profiles  weighted complexity x volume classes (weights
+#                          normalize; mixed per draw from the agent's seeded
+#                          'queries' RNG child stream)
+#
+# Token distributions (see src/agent_db_sim/components/agent_client.py):
+#   fixed(value) uniform(low,high) geometric(p) exponential(rate)
+#   gamma(shape,scale) normal(mean,sigma) lognormal(mean,sigma)  # ints >= 1
+
+sim:
+  until: 100.0
+  seed: 7
+
+agents:
+  count: 4
+  input_tokens:             # ~512-token prompts
+    distribution: lognormal
+    mean: 6.2
+    sigma: 0.3
+  output_tokens:            # long-hand gamma draw, clamp-rounded to int
+    distribution: gamma
+    shape: 2.0
+    scale: 120.0
+  query_profiles:
+    - name: point_read      # cheap complexity, tiny volume
+      complexity: 0.25
+      volume: 0.05
+      weight: 0.7
+    - name: wide_scan       # expensive complexity, bulky volume
+      complexity: 4.0
+      volume: 32.0
+      weight: 0.3
+
+profiles:
+  many:                     # overlay: scale the fan-out knob
+    agents:
+      count: 16
+  one_agent:                # overlay: single-agent reproducibility check
+    agents:
+      count: 1

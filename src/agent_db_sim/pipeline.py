@@ -1,0 +1,350 @@
+"""Run pipeline (ticket 13): one scenario -> one complete run directory.
+
+``execute_run`` drives the pipeline every ``agent-db-sim run``/``sweep`` run
+goes through:
+
+1. config snapshot -> ``<run-dir>/config.yaml``
+2. build the model (registry ``build_model``: AgentClient + LLMEndpoint +
+   DBEndpoint wired per the ticket-03 connect graph) and simulate until
+   ``sim.until`` on one shared :class:`InMemorySink`
+3. metrics: the same sink -> ``collect_run`` -> ``<run-dir>/metrics.db``
+   (traces + derived percentile / utilization / bottleneck-attribution
+   tables)
+4. viz: the same sink -> ``write_vcd`` -> ``<run-dir>/run.vcd``
+5. reports: the standard report rendered from ``metrics.db`` ->
+   ``<run-dir>/report.html`` (standalone, vendored plotly)
+6. a compact ``summary.json`` with the destination's analytical numbers:
+   e2e latency percentiles, per-hop percentiles, utilization overview and
+   the ranked bottleneck attribution.
+
+``enumerate_sweep`` runs the same pipeline for every factor combination of
+the scenario's ``sweep:`` section and writes a ``sweep_summary.json`` plus a
+``sweep_summary.html`` comparing the runs (which component bottlenecks first
+per topology, and what scale-out changes).
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sqlite3
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from omegaconf import OmegaConf
+
+from agent_db_sim.metrics.collect import collect_run
+from agent_db_sim.simkit.probes import InMemorySink
+from agent_db_sim.simkit.registry import build_model
+from agent_db_sim.simkit.runner import run_model
+from agent_db_sim.simkit.sweep import (
+    RunResult,
+    _sanitize,
+    apply_factors,
+    read_sweep,
+    run_id_for,
+)
+from agent_db_sim.viz.report import render_report, static_dir
+from agent_db_sim.viz.vcd import write_vcd
+
+__all__ = ["execute_run", "summarize_run", "enumerate_sweep"]
+
+
+# --------------------------------------------------------------------------- #
+# single run                                                                   #
+# --------------------------------------------------------------------------- #
+
+def sim_until(cfg: Any, default: float = 100.0) -> float:
+    value = OmegaConf.select(cfg, "sim.until")
+    return float(default if value is None else value)
+
+
+def execute_run(cfg: Any, run_dir: Any) -> Dict[str, Any]:
+    """Drive one full simulation run and materialize the run directory."""
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(cfg, run_dir / "config.yaml")
+
+    sink = InMemorySink()  # clock is attached by the model at construct
+    top = build_model(cfg, sink=sink)
+    result = run_model(top, cfg, until=sim_until(cfg), sink=sink)
+
+    db_path = collect_run(run_dir, sink, cfg)
+    vcd_path = write_vcd(run_dir / "run.vcd", sink.samples)
+    report_path = _render_standard_report(run_dir)
+
+    summary = summarize_run(run_dir, collected=result.collected)
+    summary["artifacts"] = {
+        "metrics.db": db_path.name,
+        "run.vcd": vcd_path.name,
+        "report.html": report_path.name,
+        "end_time": result.end_time,
+    }
+    (run_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    )
+    return summary
+
+
+def _render_standard_report(run_dir: Path) -> Path:
+    html = render_report(run_dir, name="standard", standalone=True)
+    out_path = run_dir / "report.html"
+    out_path.write_text(html)
+    plotly = run_dir / "plotly.min.js"
+    if not plotly.exists():
+        shutil.copyfile(static_dir / "plotly.min.js", plotly)
+    return out_path
+
+
+# --------------------------------------------------------------------------- #
+# per-run summary numbers (read back from metrics.db)                          #
+# --------------------------------------------------------------------------- #
+
+def summarize_run(run_dir: Any, collected: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The destination's analytical numbers for one run, from its metrics.db.
+
+    - e2e latency percentiles (agent-observed, warmup excluded)
+    - per-hop latency percentiles for every recorded hop
+    - utilization overview (top saturation rows)
+    - ranked hybrid bottleneck attribution (top 5)
+    """
+    conn = sqlite3.connect(f"file:{Path(run_dir) / 'metrics.db'}?mode=ro", uri=True)
+    try:
+        percentiles: List[Dict[str, Any]] = []
+        for src, kind, p50, p95, p99, n in conn.execute(
+            "SELECT source, kind, p50, p95, p99, n FROM latency_percentiles "
+            "ORDER BY kind, source"
+        ):
+            percentiles.append(
+                {
+                    "source": str(src),
+                    "kind": str(kind),
+                    "p50": p50,
+                    "p95": p95,
+                    "p99": p99,
+                    "n": n,
+                }
+            )
+
+        bottleneck: List[Dict[str, Any]] = []
+        for comp, stage, q, share, sat, score in conn.execute(
+            "SELECT component, stage, queue_delay, queue_share, sat_score, score "
+            "FROM bottleneck ORDER BY score DESC LIMIT 5"
+        ):
+            bottleneck.append(
+                {
+                    "component": str(comp),
+                    "stage": str(stage),
+                    "queue_delay": q,
+                    "queue_share": share,
+                    "sat_score": sat,
+                    "score": score,
+                }
+            )
+
+        utilization = [
+            {
+                "signal": str(sig),
+                "component": str(comp),
+                "mean": mean,
+                "peak": peak,
+                "mean_util": mean_util,
+            }
+            for sig, comp, mean, peak, mean_util in conn.execute(
+                "SELECT signal, component, mean, peak, mean_util "
+                "FROM utilization_stats "
+                "WHERE mean_util IS NOT NULL ORDER BY mean_util DESC LIMIT 8"
+            )
+        ]
+
+        counts: Dict[str, Any] = {}
+        if collected is not None:
+            agents = collected.get("agents")
+            if isinstance(agents, dict) and agents:
+                counts["agents"] = len(agents)
+                counts["inference_completed"] = sum(
+                    int(v.get("inference_received", 0)) for v in agents.values()
+                )
+                counts["db_completed"] = sum(
+                    int(v.get("db_received", 0)) for v in agents.values()
+                )
+        config = {}
+        config_path = Path(run_dir) / "config.yaml"
+        if config_path.exists():
+            config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False)  # type: ignore[assignment]
+    finally:
+        conn.close()
+
+    return _condense(
+        {
+            "percentiles": percentiles,
+            "bottleneck": bottleneck,
+            "utilization_top": utilization,
+            "counts": counts,
+            "config": _config_digest(config),
+        }
+    )
+
+
+def _config_digest(config: Dict[str, Any]) -> Dict[str, Any]:
+    db_cfg = config.get("db", {}) if isinstance(config, dict) else {}
+    agents_cfg = config.get("agents", {}) if isinstance(config, dict) else {}
+    llm_cfg = config.get("llm", {}) if isinstance(config, dict) else {}
+    compute_nodes = db_cfg.get("compute_nodes")
+    coordinators = db_cfg.get("coordinators")
+    return {
+        "db.topology": db_cfg.get("topology"),
+        "db.compute_nodes": compute_nodes,
+        "db.storage_nodes": db_cfg.get("storage_nodes"),
+        "db.coordinators": coordinators,
+        "agents.count": agents_cfg.get("count"),
+        "llm.slots": llm_cfg.get("slots"),
+    }
+
+
+def _condense(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull the headline numbers up to the top level of the summary."""
+    e2e = next(
+        (row for row in summary["percentiles"] if row["source"] == "e2e"),
+        None,
+    )
+    bottleneck = summary["bottleneck"]
+    digest = summary.pop("config", {})
+    counts = summary.pop("counts", {})
+    out: Dict[str, Any] = {
+        **digest,
+        **counts,
+        "e2e_percentiles": (
+            {k: e2e[k] for k in ("p50", "p95", "p99", "n")}
+            if e2e is not None
+            else None
+        ),
+        "bottleneck_winner": (
+            {k: bottleneck[0][k] for k in ("component", "stage", "score", "queue_share")}
+            if bottleneck
+            else None
+        ),
+        **summary,
+    }
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# factorial sweep                                                              #
+# --------------------------------------------------------------------------- #
+
+def enumerate_sweep(
+    cfg: Any,
+    out_root: Any = "runs",
+) -> Tuple[List[RunResult], Dict[str, Any]]:
+    """Enumerate the scenario's sweep factors and run the full pipeline once
+    per combination, sharing the run-dir layout of simkit's sweep runner
+    (``<out_root>/<sweep-name>/<run-id>/``)."""
+    name, factors = read_sweep(cfg)
+    sweep_dir = Path(out_root) / _sanitize(name)
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    results: List[RunResult] = []
+    runs: List[Dict[str, Any]] = []
+
+    import itertools
+
+    for index, combo in enumerate(itertools.product(*factors.values())):
+        assignments = dict(zip(factors.keys(), combo))
+        run_cfg = apply_factors(cfg, assignments)
+        run_id = run_id_for(index, assignments)
+        directory = sweep_dir / run_id
+        try:
+            directory.mkdir(parents=True)
+        except FileExistsError as exc:
+            from agent_db_sim.simkit.errors import SweepError
+
+            raise SweepError(
+                f"run directory already exists: {directory} "
+                f"(remove it or change out_root to re-run)"
+            ) from exc
+        summary = execute_run(run_cfg, directory)
+        results.append(
+            RunResult(index=index, run_id=run_id, directory=directory, values=assignments)
+        )
+        runs.append({"run_id": run_id, "values": assignments, **summary})
+
+    comparison = _compare_runs(runs)
+    sweep_summary = {
+        "name": name,
+        "out_root": str(Path(out_root)),
+        "n_runs": len(results),
+        "factors": factors,
+        "runs": runs,
+        "comparison": comparison,
+    }
+    (sweep_dir / "sweep_summary.json").write_text(
+        json.dumps(sweep_summary, indent=2, sort_keys=True, default=str) + "\n"
+    )
+    (sweep_dir / "sweep_summary.html").write_text(_render_sweep_html(sweep_summary))
+    return results, sweep_summary
+
+
+def _compare_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Destination-question cross-run digest: e2e + bottleneck winner per run,
+    and the grouped scale-out deltas."""
+    by_run = [
+        {
+            "values": run["values"],
+            "e2e_p95": (run.get("e2e_percentiles") or {}).get("p95"),
+            "bottleneck": run.get("bottleneck_winner"),
+        }
+        for run in runs
+    ]
+    scale_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for run in runs:
+        topology = run.get("db.topology")
+        scale_groups.setdefault(str(topology), []).append(
+            {
+                "compute_nodes": run.get("db.compute_nodes"),
+                "agents": run.get("agents.count"),
+                "e2e_p95": (run.get("e2e_percentiles") or {}).get("p95"),
+                "bottleneck": (run.get("bottleneck_winner") or {}).get("component"),
+                "queue_share": (run.get("bottleneck_winner") or {}).get("queue_share"),
+            }
+        )
+    return {"by_run": by_run, "scale_by_topology": scale_groups}
+
+
+_SWEEP_TEMPLATE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>sweep: {{ name }}</title>
+<style>
+ body { font-family: system-ui, sans-serif; margin: 2rem; }
+ table { border-collapse: collapse; margin: 1rem 0; }
+ th, td { border: 1px solid #bbb; padding: 4px 10px; text-align: left; }
+ th { background: #eee; }
+ code { background: #f4f4f4; padding: 0 4px; }
+</style></head><body>
+<h1>Sweep: {{ name }}</h1>
+<p>{{ n_runs }} runs &mdash; factors: {{ factors }}</p>
+<h2>Per-run comparison</h2>
+<table>
+<tr><th>run</th><th>factors</th><th>e2e p50</th><th>e2e p95</th><th>e2e p99</th>
+    <th>bottleneck winner</th><th>score</th><th>queue share</th></tr>
+{% for run in runs %}
+<tr>
+ <td><code>{{ run.run_id }}</code></td>
+ <td><code>{{ run.values }}</code></td>
+ <td>{{ '%.3f'|format(run.e2e_percentiles.p50) if run.e2e_percentiles else '-' }}</td>
+ <td>{{ '%.3f'|format(run.e2e_percentiles.p95) if run.e2e_percentiles else '-' }}</td>
+ <td>{{ '%.3f'|format(run.e2e_percentiles.p99) if run.e2e_percentiles else '-' }}</td>
+ <td>{% if run.bottleneck_winner %}<code>{{ run.bottleneck_winner.component }}.{{ run.bottleneck_winner.stage }}</code>{% else %}-{% endif %}</td>
+ <td>{{ '%.3f'|format(run.bottleneck_winner.score) if run.bottleneck_winner else '-' }}</td>
+ <td>{{ '%.3f'|format(run.bottleneck_winner.queue_share) if run.bottleneck_winner else '-' }}</td>
+</tr>
+{% endfor %}
+</table>
+</body></html>
+"""
+
+
+def _render_sweep_html(summary: Dict[str, Any]) -> str:
+    from jinja2 import Environment
+
+    env = Environment(autoescape=True)
+    template = env.from_string(_SWEEP_TEMPLATE)
+    return template.render(**summary)

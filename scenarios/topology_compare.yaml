@@ -1,0 +1,82 @@
+# topology_compare.yaml — the acceptance scenario (ticket 13).
+#
+# Three DB topologies under one closed-loop agent workload, with one scale-out
+# variant each via the `db.compute_nodes` factor:
+#
+#   agent-db-sim run   scenarios/topology_compare.yaml [--out runs]
+#       -> one full run dir (centralized baseline): config.yaml, metrics.db,
+#          run.vcd, report.html, summary.json
+#   agent-db-sim sweep scenarios/topology_compare.yaml [--out runs]
+#       -> runs/topology-sweep/<run-id>/ per combination of
+#          db.topology x db.compute_nodes x agents.count
+#          (12 runs) + sweep_summary.json / sweep_summary.html
+#
+# Sizing intent: the LLM endpoint is comfortably provisioned (8 slots per
+# agent, token cap above aggregate demand) so queues develop on the DB side;
+# per-node profile mix (point reads + 20% scans) makes storage volume and
+# compute complexity both visible, and the scan volume makes per-hop network
+# latency/bandwidth matter on disaggregated/distributed.
+
+sim:
+  until: 200.0
+  seed: 11
+
+agents:
+  count: 8
+  input_tokens:
+    distribution: fixed
+    value: 256
+  output_tokens:
+    distribution: fixed
+    value: 128
+  query_profiles:
+    - name: point_read      # cheap complexity, tiny volume
+      complexity: 0.2
+      volume: 0.05
+      weight: 0.8
+    - name: wide_scan       # heavier complexity, bulky volume
+      complexity: 0.6
+      volume: 2.0
+      weight: 0.2
+
+llm:
+  slots: 8                  # one slot per agent: no LLM queueing
+  input_tokens_per_s: 4000  # ~0.064 u per request input phase
+  output_tokens_per_s: 2000 # ~0.064 u per request output phase
+  ingress: fifo
+
+db:
+  topology: centralized     # swept factor: centralized | disaggregated | distributed
+  compute_nodes: 4          # swept factor: 4 (base) | 8 (scale-out)
+  storage_nodes: 2          # M fixed on disaggregated; ignored elsewhere
+  coordinators: 2           # distributed: entry nodes (fixed across runs)
+  compute:
+    slots: 2                # per compute node
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: nvme
+  network:
+    latency: 0.01           # per hop: visible against ~0.2 u compute costs
+    bandwidth: 500.0        # scan responses (2 GB) take ~4 ms in transfer
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2   # distributed coordinator compute multiplier
+
+profiles:
+  agents_16:                # `agent-db-sim run ... --profile agents_16`
+    agents:
+      count: 16
+  llm_tight:                # overlay: starve the LLM to make it bottleneck first
+    llm:
+      slots: 2
+      input_tokens_per_s: 1500
+      output_tokens_per_s: 750
+
+sweep:
+  name: topology-sweep
+  factors:
+    db.topology: [centralized, disaggregated, distributed]
+    db.compute_nodes: [4, 8]      # scale-out variant (centralized: no-op)
+    agents.count: [8, 16]         # demand axis

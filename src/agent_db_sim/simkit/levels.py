@@ -12,14 +12,37 @@ limited both by the level (volume-wise) and by the bandwidth rate.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import simpy
 
 from agent_db_sim.simkit.errors import BandwidthError
 from agent_db_sim.simkit.probes import NULL_SINK, ProbeSink
 
-__all__ = ["TransferRecord", "BandwidthPool"]
+__all__ = ["TransferRecord", "TolerantContainer", "BandwidthPool"]
+
+
+class TolerantContainer(simpy.Container):
+    """Container whose ``put`` accepts when the level is within an epsilon of
+    the requested amount after a ``get`` (imperfect floats make
+    ``capacity - level`` fall ~1e-15 short of the returned volume, which
+    otherwise wedges the staging level permanently).
+
+    Hoisted from the ticket-10 DB ``NetPool`` workaround so every shared
+    staging level gets the same fp guard. The epsilon is only exercised when
+    the exact-put check would spuriously fail, so it cannot change behavior
+    for exactly-representable volumes.
+    """
+
+    fp_tol = 1e-9
+
+    def _do_put(self, event):  # noqa: ANN001 - simpy signature
+        if self._capacity - self._level >= event.amount - self.fp_tol:
+            self._level = min(self._capacity, self._level + event.amount)
+            event.succeed()
+            return True
+        return None
+
 
 
 @dataclass(frozen=True)
@@ -63,7 +86,7 @@ class BandwidthPool:
         self.env = env
         self.capacity = float(capacity)
         self.bandwidth = float(bandwidth)
-        self.container = simpy.Container(env, capacity=self.capacity, init=init)
+        self.container = TolerantContainer(env, capacity=self.capacity, init=init)
         self._sink = sink if sink is not None else NULL_SINK
         self.records: list[TransferRecord] = []
         self._sink.sample("level", self.container.level, component=self.name)

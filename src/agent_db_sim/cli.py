@@ -1,6 +1,7 @@
 """typer CLI entry point for agent-db-sim.
 
-Usage: ``agent-db-sim run scenarios/smoke.yaml [--profile fast]``
+Usage: ``agent-db-sim run scenarios/topology_compare.yaml [--out runs]``
+       ``agent-db-sim sweep scenarios/topology_compare.yaml [--out runs]``
        ``agent-db-sim serve <run-dir> [--port]``   (viz server)
        ``agent-db-sim render <run-dir> [--name]``  (standalone report HTML)
 """
@@ -15,7 +16,6 @@ import typer
 from agent_db_sim.config import ConfigError, load_scenario
 from agent_db_sim.simkit.errors import SweepError
 from agent_db_sim.simkit.runner import run_minimal
-from agent_db_sim.simkit.sweep import run_sweep
 
 app = typer.Typer(
     add_completion=False,
@@ -23,6 +23,7 @@ app = typer.Typer(
 )
 
 DEFAULT_VIZ_PORT = 8060
+DEFAULT_OUT = "runs"
 
 
 
@@ -37,6 +38,12 @@ def run(
         ..., exists=True, file_okay=True, dir_okay=False, readable=True,
         help="Scenario config (YAML) to execute.",
     ),
+    out: Path = typer.Option(
+        DEFAULT_OUT,
+        "--out",
+        "-o",
+        help="Root output directory; the run dir lands under <out>/<scenario-stem>/. ",
+    ),
     profile: Optional[str] = typer.Option(
         None,
         "--profile",
@@ -44,26 +51,70 @@ def run(
         help="Named profile overlay to merge on top of the scenario config.",
     ),
 ) -> None:
-    """Execute a scenario end to end and print a one-line summary."""
+    """Execute a scenario end to end and write one complete run directory.
+
+    Scenario configs with a ``db:`` section run the full model pipeline
+    (build_model -> simulate -> metrics.db + run.vcd + report.html +
+    summary.json); the minimal ``loop:``-only smoke scenario keeps its
+    placeholder loop.
+    """
     try:
         cfg = load_scenario(scenario, profile)
     except ConfigError as exc:
         typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
 
-    loop = cfg.loop
-    result = run_minimal(
-        agents=int(loop.agents),
-        n_timeouts=int(loop.n_timeouts),
-        timeout=float(loop.timeout),
-        until=float(cfg.sim.until),
+    if "db" not in cfg:
+        # placeholder smoke loop (ticket 06; real scenarios carry `db:`)
+        loop = cfg.loop
+        result = run_minimal(
+            agents=int(loop.agents),
+            n_timeouts=int(loop.n_timeouts),
+            timeout=float(loop.timeout),
+            until=float(cfg.sim.until),
+        )
+        typer.echo(
+            f"agent-db-sim smoke: {result.agents} agents x {result.timeouts_per_agent} "
+            f"timeouts ({result.timeout}u each) -> {result.total_timeouts} timeouts, "
+            f"sim end t={result.end_time}u"
+        )
+        return
+
+    from agent_db_sim.pipeline import execute_run
+
+    run_dir = _next_run_dir(out, scenario.stem)
+    try:
+        summary = execute_run(cfg, run_dir)
+    except Exception as exc:  # fail visible: report and exit non-zero
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    e2e = summary.get("e2e_percentiles") or {}
+    winner = summary.get("bottleneck_winner") or {}
+    typer.echo(f"run dir: {run_dir}")
+    typer.echo(
+        f"  e2e p50/p95/p99 = "
+        f"{e2e.get('p50', float('nan')):.3f}/{e2e.get('p95', float('nan')):.3f}/"
+        f"{e2e.get('p99', float('nan')):.3f} (n={e2e.get('n', 0)})"
+    )
+    typer.echo(
+        f"  bottleneck: {winner.get('component', '<none>')}.{winner.get('stage', '*')} "
+        f"(score={winner.get('score', 0):.3f}, queue_share={winner.get('queue_share', 0):.3f})"
     )
 
-    typer.echo(
-        f"agent-db-sim smoke: {result.agents} agents x {result.timeouts_per_agent} "
-        f"timeouts ({result.timeout}u each) -> {result.total_timeouts} timeouts, "
-        f"sim end t={result.end_time}u"
-    )
+
+def _next_run_dir(out_root: Path, stem: str) -> Path:
+    """First free ``<out_root>/<stem>[-<n>]`` directory for a single run."""
+    base = out_root / stem
+    if not base.exists():
+        return base
+    n = 2
+    candidate = out_root / f"{stem}-{n}"
+    while candidate.exists():
+        n += 1
+        candidate = out_root / f"{stem}-{n}"
+    return candidate
+
 
 
 @app.command()
@@ -85,10 +136,12 @@ def sweep(
         help="Named profile overlay to merge on top of the scenario config.",
     ),
 ) -> None:
-    """Enumerate the scenario's sweep factors and write one run dir per combo.
+    """Enumerate the scenario's sweep factors: one full run per combination.
 
-    Metrics tables and run.vcd per run are stubs in this ticket; the run
-    directories and per-run config snapshots are the contract.
+    Every run dir gets the complete artifact set (config snapshot, metrics.db,
+    run.vcd, report.html, summary.json) plus a sweep-level
+    ``sweep_summary.json`` / ``sweep_summary.html`` comparing the runs. The
+    placeholder ``loop:``-only scenarios keep simkit's stub sweep runner.
     """
     try:
         cfg = load_scenario(scenario, profile)
@@ -97,7 +150,15 @@ def sweep(
         raise typer.Exit(code=2) from exc
 
     try:
-        results = run_sweep(cfg, out_root=out)
+        if "db" in cfg:
+            from agent_db_sim.pipeline import enumerate_sweep
+
+            results, summary = enumerate_sweep(cfg, out_root=out)
+        else:
+            from agent_db_sim.simkit.sweep import run_sweep
+
+            results = run_sweep(cfg, out_root=out)
+            summary = {}
     except SweepError as exc:
         typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
@@ -105,8 +166,17 @@ def sweep(
     name = results[0].directory.parent.name if results else "sweep"
     typer.echo(
         f"sweep {name!r}: {len(results)} runs written under "
-        f"{out / name}/ (config snapshot per run)"
+        f"{out}/{name}/"
     )
+    if summary:
+        for run in summary.get("runs", []):
+            e2e = run.get("e2e_percentiles") or {}
+            winner = run.get("bottleneck_winner") or {}
+            typer.echo(
+                f"  {run['run_id']}: e2e p95={e2e.get('p95', float('nan')):.3f} "
+                f"bottleneck={winner.get('component', '<none>')}."
+                f"{winner.get('stage', '*')} (score={winner.get('score', 0):.3f})"
+            )
 
 def _require_viz_run(run_dir: Path) -> None:
     import agent_db_sim.viz.server as viz_server

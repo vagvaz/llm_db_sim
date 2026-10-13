@@ -18,26 +18,9 @@ from agent_db_sim.simkit.errors import ComponentError
 from agent_db_sim.simkit.levels import BandwidthPool
 from agent_db_sim.simkit.probes import NULL_SINK, ProbeSink
 
-import simpy
-
 __all__ = ["NetLink", "NetworkConfig"]
 
 StageName = str
-
-
-class _TolerantContainer(simpy.Container):
-    """Container whose put accepts when the level is within an epsilon of the
-    transfer amount after a get (imperfect floats make ``cap - level`` fall
-    2e-15 short, which otherwise wedges the staging level permanently)."""
-
-    _fp_tol = 1e-9
-
-    def _do_put(self, event):  # noqa: ANN001 - simpy signature
-        if self._capacity - self._level >= event.amount - self._fp_tol:
-            self._level = min(self._capacity, self._level + event.amount)
-            event.succeed()
-            return True
-        return None
 
 
 class NetworkConfig:
@@ -59,15 +42,8 @@ class NetworkConfig:
 
 
 class NetPool(BandwidthPool):
-    """BandwidthPool over a tolerantly clamped container (fp-safe staging)."""
-
-    def __init__(self, env: Any, name: str, **kwargs: Any) -> None:
-        super().__init__(env, name, **kwargs)
-        # swap in the fp-safe container, preserving the level and wiring the
-        # same probe sink signals
-        self.container = _TolerantContainer(
-            env, capacity=self.capacity, init=self.container.level
-        )
+    """BandwidthPool over the fp-safe staging container (now the level-layer
+    default; see :class:`agent_db_sim.simkit.levels.TolerantContainer`)."""
 
 
 class NetLink(Component):

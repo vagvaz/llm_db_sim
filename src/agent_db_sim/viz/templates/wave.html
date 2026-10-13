@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="/static/d3-wave.css">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1rem; }
+  #wave { width: 100%; height: 70vh; overflow: hidden; }
+  #stream-state { color: #666; font-size: 0.85rem; }
+  .seqLabelTextInput { margin: 0 0.5rem 0.4rem 0; }
+</style>
+{# locally vendored, fully offline: d3 → farawesome shim → d3-wave → our glue #}
+<script src="/static/d3.min.js"></script>
+<script src="/static/fa-icons.js"></script>
+<script src="/static/d3-wave.js"></script>
+{% endblock %}
+{% block content %}
+<h2>Waveform view — live VCD signals</h2>
+<p id="stream-state">connecting…</p>
+<div id="wave"></div>
+<script src="/static/app.js"></script>
+{% endblock %}

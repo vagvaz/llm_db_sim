@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}agent-db-sim{% endblock %}</title>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header>
+  <h1>agent-db-sim — run <code>{{ meta.run_name }}</code></h1>
+  <nav>
+    <a href="/">waveform</a>
+    <a href="/reports">reports</a>
+    <a href="/vcd">raw VCD</a>
+    {% if surfer_url is defined and surfer_url %}
+    <a href="{{ surfer_url }}" target="_blank" rel="noopener"
+       title="deep-dive the identical /vcd file in Surfer (WASM)">open in Surfer ↗</a>
+    {% endif %}
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block head %}
+<script src="{{ plotly_src }}"></script>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  table.latency { border-collapse: collapse; margin: 1rem 0; }
+  table.latency th, table.latency td { border: 1px solid #ccc; padding: 0.25rem 0.7rem; text-align: right; }
+  table.latency th:first-child, table.latency td:first-child { text-align: left; }
+  .figure { min-height: 380px; margin: 1.5rem 0; }
+  h2 { margin-top: 2.5rem; }
+</style>
+{% endblock %}
+{% block title %}report: {{ template_name }} — {{ meta.run_name }}{% endblock %}
+{% block content %}
+<h2>Run metadata</h2>
+<table class="latency">
+  <tr><th>t_end</th><td>{{ meta.get('t_end', '—') }}</td></tr>
+  <tr><th>warmup_end</th><td>{{ meta.get('warmup_end', '—') }}</td></tr>
+  {% if meta.get('vcd_signals') is not none %}<tr><th>VCD signals</th><td>{{ meta['vcd_signals'] }}</td></tr>{% endif %}
+  {% if meta.get('vcd_t_end') is not none %}<tr><th>VCD t_end</th><td>{{ meta['vcd_t_end'] }}</td></tr>{% endif %}
+</table>
+
+<h2>Latency percentiles (per stage)</h2>
+<div id="fig-latency-percentiles" class="figure">
+  <script>Plotly.newPlot("fig-latency-percentiles", {{ figures['fig-latency-percentiles'] | safe }}, {responsive: true});</script>
+</div>
+<table class="latency">
+  <thead><tr><th>source</th><th>kind</th><th>p50</th><th>p95</th><th>p99</th><th>n</th></tr></thead>
+  <tbody>
+  {% for src, kind, p50, p95, p99, n in rows_percentiles %}
+    <tr><td>{{ src }}</td><td>{{ kind }}</td><td>{{ '%.4g'|format(p50|float) }}</td><td>{{ '%.4g'|format(p95|float) }}</td><td>{{ '%.4g'|format(p99|float) }}</td><td>{{ n }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Utilization (slots / token rate)</h2>
+<div id="fig-utilization" class="figure">
+  <script>Plotly.newPlot("fig-utilization", {{ figures['fig-utilization'] | safe }}, {responsive: true});</script>
+</div>
+<div id="fig-token-rate" class="figure">
+  <script>Plotly.newPlot("fig-token-rate", {{ figures['fig-token-rate'] | safe }}, {responsive: true});</script>
+</div>
+<table class="latency">
+  <thead><tr><th>signal</th><th>component</th><th>mean</th><th>peak</th><th>mean util</th></tr></thead>
+  <tbody>
+  {% for sig, comp, mean, peak, mean_util in rows_utilization %}
+    <tr><td>{{ sig }}</td><td>{{ comp }}</td><td>{{ '%.4g'|format(mean|float) if mean is not none }}</td><td>{{ '%.4g'|format(peak|float) if peak is not none }}</td><td>{{ '%.4g'|format(mean_util|float) if mean_util is not none else '—' }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Bottleneck attribution (hybrid: queue share 70% + saturation 30%)</h2>
+<div id="fig-bottleneck" class="figure">
+  <script>Plotly.newPlot("fig-bottleneck", {{ figures['fig-bottleneck'] | safe }}, {responsive: true});</script>
+</div>
+{% endblock %}

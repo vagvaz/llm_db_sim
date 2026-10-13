@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}reports — {{ meta.run_name }}{% endblock %}
+{% block content %}
+<h2>Reports for run <code>{{ meta.run_name }}</code></h2>
+<p>Templates are auto-indexed from the server's <code>templates/</code> directory:
+  drop in a new <code>&lt;name&gt;.html</code> to add one.</p>
+<ul>
+{% for t in templates %}
+  <li><a href="/reports/{{ t.name }}">{{ t.name }}</a> <small>({{ t.file }})</small></li>
+{% endfor %}
+</ul>
+{% endblock %}

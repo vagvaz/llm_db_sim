@@ -18,7 +18,8 @@ throughput, utilizations, queue depths, and the **latency distribution**
 | File | Purpose |
 |---|---|
 | `agent_db_sim_analyzer.html` | **The webpage** — single self-contained file (analytic + Monte Carlo + compare). Open it in any browser; no server, no network. |
-| `core.js` | The math engine (dependency-free JS, runs in browser *and* node). The same code is embedded in the webpage between `MATHCORE` markers. |
+| `core.js` | The math engine (dependency-free JS, browser *and* node): multi-station closed chains, arrival theorem, sojourn percentiles. Embedded in the webpage between `MATHCORE` markers. |
+| `math_primer.html` | **Detailed HTML presentation of the math** — acronym/symbol glossary, layer-by-layer explanations with worked examples, and references with verified digital links (free/paywalled tagged). |
 | `verify_core.js` | Verification suite (`node analysis/verify_core.js`) — 27 checks against independent ground truth. |
 | `smoke_page.js` | Headless regression test (`node analysis/smoke_page.js`) — runs the page's scripts in a DOM shim. |
 | `README.md` | This guide. |
@@ -41,6 +42,27 @@ throughput, utilizations, queue depths, and the **latency distribution**
 
 Defaults match the repo's smoke scenario heavy case: N=8 (2 in sim), τ_think=2 s,
 τ_LLM=1.5 s (c=4), τ_DB=0.3 s (c=8).
+
+## Topology: multiple nodes (compute / storage / inference)
+
+The **Topology — station chain** card lists the M/G/c endpoints every agent visits **once per
+cycle, in order**. Each row is a node: name, τ, servers c, SCV. Presets: *LLM+DB* and
+*LLM+DB (compute + storage)* — the decomposed-DB chain (all DB demand split over chained
+nodes); add more stages (e.g. a second inference step) with **+ station**. Multiple agents is
+the closed loop itself (N). Means are exact via Buzen for any chain length (verified against
+independent CTMC solves at K=3 with N up to 8).
+
+## The three headline metrics
+
+1. **DB arrival distribution** — exact PMF of how many agents are already at the last station
+   when a fresh query arrives (arrival theorem: the arriving job sees the N−1 chain; exact
+   product-form marginals). The DES histogram should match this same shape.
+2. **Agent-facing DB latency** — per-station sojourn percentiles (p50/p90/p95/p99 of τ + wait)
+   computed in closed form from the calibrated wait mixture (exact mean; exact-τ collapse when
+   P(wait=0) > the percentile).
+3. **Bottleneck detection** — the argmax-ρ station is named in the banner; tiles show its load
+   and P(wait); the station table adds the **queue-delay share** (% of loop time spent queueing
+   at each node) and the saturation sweep sharpens where the knee is.
 
 ## Modes
 
@@ -79,7 +101,7 @@ saturation sweep (mean latency vs. N with knee marker); per-station table
 
 ## Caveats — what is verified and what is NOT (please read)
 
-**Verified** (node suite, 27 checks + headless page smoke test):
+**Verified** (node suite, 49 checks + headless page smoke test):
 - Exact means cross-checked against a brute-force CTMC stationary solve (independent method)
   to 1e-6 on several configs (N=1..8, servers 1..4, with/without think node).
 - Closed M/M/1//2 chain against the textbook hand-analysis: X = 2/3, L = 1 per node.

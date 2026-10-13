@@ -1,0 +1,115 @@
+# grounded_agent_70b.yaml — a *research-grounded* closed-loop agent scenario
+# (Stage-6 lane A). Every number below cites one of the three research docs
+# in .scratch/agent-db-sim/research/; the docs carry the full derivations.
+#
+#   llm midpoint (llm-inference-serving.md §4 "Recommended simulator defaults"):
+#     output_tokens_per_s 2000 (70B FP8, one GPU, well-tuned batching),
+#     input_tokens_per_s 8000 (aggregate prefill = 2-10x decode, midpoint 4x),
+#     slots 32 (InferenceX 50-78 tok/s/user => 12-90 real slots).
+#   agent token draws (llm-inference-serving.md §3 agent token statistics):
+#     input  lognormal(mean=11.0, sigma=0.6): median e^11 ~= 60k tok/call,
+#            mean e^(11+0.18) ~= 76k (research mean 60-84k),
+#            p95 e^(11+0.99) ~= 162k (research p95 150-300k).
+#     output lognormal(mean=7.36, sigma=1.0) approximates the research
+#            bimodal split (0.6 x 100-500 + 0.4 x 2000-10000): mean ~2.5k
+#            tok/call, median ~1.6k, tail ~8k.
+#   query_profiles = the TPC-derived classes (tpc-workloads.md, the
+#     "mixed_agent_retrieval_analytics" composition: point_lookup 0.45,
+#     small_analytic 0.20, join_heavy 0.10, wide_scan_aggregate 0.10,
+#     oltp_tx 0.15) with [typical] midpoints of the YAML-ready ranges.
+#   storage backend = ssd_enterprise (ssd-generations.md §4: the "honest"
+#     DB choice - enterprise drives are flat across fill, consumer ones
+#     burn through SLC caches).
+#
+# With these tokens (inputs are ~8x outputs, research says agents send
+# ~8x more input than output) the aggregate LLM token demand massively
+# exceeds the 10k tok/s cap, so the LLM_endpoint is the expected primary
+# bottleneck and the aggregate token rate should pin near
+# 8000 in / 2000 out tok/s (see the "lingering" sanity numbers in the
+# lane report). DB queueing develops on the analytic classes.
+#
+# Profiles:
+#   run (default)       : 32 agents x until 600 u (realistic default)
+#   --profile demo      : 8 agents x until 120 u (fast demonstration)
+#   --profile centralized / disaggregated : topology overlays
+#   --profile llm_huge  : 8x-token cap so the DB side becomes the bottleneck
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 32
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005         # typical of [0.001, 0.02] CSE
+      volume: 0.0001            # typical of [0.00001, 0.001] GB
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5           # typical of [0.5, 3] CSE
+      volume: 0.5               # typical of [0.1, 2] GB
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21 (Q9 17.8 CSE)
+      complexity: 12.0          # typical of [3, 25] CSE
+      volume: 4.0               # typical of [0.5, 8] GB
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20 (Q13 33 CSE)
+      complexity: 20.0          # typical of [5, 35] CSE
+      volume: 0.75              # typical of [0.6, 0.9] GB
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02          # typical of [0.002, 0.05] CSE
+      volume: 0.0002            # typical of [0.00005, 0.0005] GB
+      weight: 0.15
+
+llm:
+  slots: 32
+  input_tokens_per_s: 8000
+  output_tokens_per_s: 2000
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 4              # no-op on centralized (kept for overlays)
+  storage_nodes: 4
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005             # 100 Gb storage-fabric class hop
+    bandwidth: 25.0             # GB/s shared segment (Gen5/A-class NICs)
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+profiles:
+  demo:                         # quick demonstration run (seconds of wall)
+    sim:
+      until: 120.0
+    agents:
+      count: 8
+  llm_huge:                     # 8x token cap: demand no longer pins the LLM,
+    llm:                        # the DB side moves to the front
+      slots: 64
+      input_tokens_per_s: 64000
+      output_tokens_per_s: 16000
+  disaggregated:
+    db:
+      topology: disaggregated
+      compute_nodes: 4
+      storage_nodes: 4

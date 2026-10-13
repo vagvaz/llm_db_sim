@@ -69,8 +69,10 @@ def _checked(
     )
 
 
-#: Explicit config-name -> parameter set registry (ticket 05 presets, plus
-#: ``hdd`` as the classic baseline). Merged into ``simkit.registry``.
+#: Explicit config-name -> parameter set registry (ticket 05 presets plus
+#: ``hdd`` and the researched PCIe generations; the gen presets derive from
+#: ``.scratch/agent-db-sim/research/ssd-generations.md``). Merged into
+#: ``simkit.registry``.
 STORAGE_BACKEND_REGISTRY: Dict[str, BackendParams] = {
     "hdd": _checked(
         "hdd",
@@ -92,6 +94,43 @@ STORAGE_BACKEND_REGISTRY: Dict[str, BackendParams] = {
         per_gb_time=0.2,
         iops_ceiling=750000.0,
         bandwidth_ceiling=5.0,
+    ),
+    # -- grounded PCIe NVMe generation presets (research doc
+    # ``.scratch/agent-db-sim/research/ssd-generations.md``, "YAML-ready
+    # presets"; read-based values, enterprise-steady-state derived):
+    # base_latency  = QD1 4K read latency (TYP, ~30-80 us per generation)
+    # per_gb_time   = 1 / sustained seq-read GB/s (rated 128K blocks)
+    # iops_ceiling  = conservative 4K random-read blend (rated vs measured)
+    # bandwidth_ceiling = sustained seq-read GB/s
+    # Write paths are 3-8x worse on real drives (read/write IOPS asymmetry
+    # >= 4:1) and are NOT modeled: see the research doc's caveats section.
+    "ssd_gen3": _checked(  # Samsung 970 EVO Plus / WD SN750 class
+        "ssd_gen3",
+        base_latency=0.00008,  # 80 us (983 DCT measured 82.1 us @59K IOPS)
+        per_gb_time=0.294,     # 1 / 3.4 GB/s
+        iops_ceiling=550000.0,  # conservative blend of 600K rated / 431K measured
+        bandwidth_ceiling=3.4,
+    ),
+    "ssd_gen4": _checked(  # 980 PRO / SN850 / FireCuda 530
+        "ssd_gen4",
+        base_latency=0.00004,  # 40 us
+        per_gb_time=0.1471,    # 1 / 6.8 GB/s
+        iops_ceiling=800000.0,  # blend: 980 PRO 545K / SN850 790K measured
+        bandwidth_ceiling=6.8,
+    ),
+    "ssd_gen5": _checked(  # Crucial T700/T705, WD SN8100 (consumer Gen5x4)
+        "ssd_gen5",
+        base_latency=0.00003,  # 30 us class (no latency gain over Gen4)
+        per_gb_time=0.0806,    # 1 / 12.4 GB/s
+        iops_ceiling=1450000.0,  # conservative vs T700 1500K rated
+        bandwidth_ceiling=12.4,
+    ),
+    "ssd_enterprise": _checked(  # Gen5 DC: Micron 9550 MAX / Kioxia CM7-V
+        "ssd_enterprise",
+        base_latency=0.00008,  # 80 us TYP (CM7-R 78 us measured loaded)
+        per_gb_time=0.0714,    # 1 / 14 GB/s
+        iops_ceiling=2400000.0,  # conservative vs 3.3M (9550) / 2.7M (CM7-V)
+        bandwidth_ceiling=14.0,
     ),
 }
 

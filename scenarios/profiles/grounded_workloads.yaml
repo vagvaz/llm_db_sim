@@ -1,0 +1,132 @@
+# grounded_workloads.yaml — grounded workload-mix x topology x storage-gen
+# sweep (Stage-6 lane A). Workload classes and mixes derive from
+# .scratch/agent-db-sim/research/tpc-workloads.md (YAML-ready block):
+#
+#   analytical_agent_tpch_like {small_analytic 0.32, join_heavy 0.45,
+#     wide_scan_aggregate 0.23}   — TPC-H 22-template bucket counts
+#   oltp_agent_tpcc_like {oltp_tx 0.88, point_lookup 0.12} — TPC-C spec mix
+#   mixed_agent_retrieval_analytics {point 0.45, small 0.20, join 0.10,
+#     wide 0.10, oltp_tx 0.15}    — composed mix (the only non-spec-derived
+#     class per the research caveat); agents interleave retrieval + analytics
+#
+# Each profile below uses the [typical] midpoint of the research ranges
+# (complexity in CSE units, volume in row-storage GB). The simulator has no
+# think-time knob (closed-loop agents alternate inference/db), so the TPC-C
+# keying/think delays are deliberately not modeled — noted in the research doc.
+#
+# Factors: db.topology (centralized | disaggregated) x
+# db.storage.backend (ssd_gen4 | ssd_enterprise), both grounded by
+# ssd-generations.md (Gen4 980 PRO/SN850 class vs Gen5 DC 9550/CM7-V).
+# Storage gen expectation from that doc: ssd_enterprise vs ssd_gen4 trades
+# one axis (base latency 80us vs 40us) and wins the other three decisively
+# (bandwidth 14 vs 6.8 GB/s, IOPS 2.4M vs 800K, per_gb_time 0.071 vs 0.147) —
+# analytic scans should get faster, tiny point reads roughly degrade-free.
+#
+# The base mix is analytical_agent_tpch_like; the other two mixes ride in
+# as profile overlays (structured query_profiles cannot ride sweep factors
+# without inflating run-dir ids past filesystem limits):
+#
+#   agent-db-sim sweep scenarios/profiles/grounded_workloads.yaml                      # mix 1 (4 runs)
+#   agent-db-sim sweep scenarios/profiles/grounded_workloads.yaml -p mix_tpcc         # mix 2 (4 runs)
+#   agent-db-sim sweep scenarios/profiles/grounded_workloads.yaml -p mix_mixed        # mix 3 (4 runs)
+#   -> the full 3 mixes x 2 topologies x 2 storage backends = 12-run matrix.
+#
+# The LLM is provisioned comfortably (slots = agents, caps above the
+# ~0.19 u/request token phases) so the DB side owns the bottleneck and the
+# storage-backend/topology deltas are visible.
+
+sim:
+  until: 60.0
+  seed: 702
+
+agents:
+  count: 16
+  input_tokens: 512             # modest grounded request sizes: the mix
+  output_tokens: 128            # comparison, not the LLM, is under study
+  query_profiles:
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5           # typical of [0.5, 3] CSE
+      volume: 0.5               # typical of [0.1, 2] GB
+      weight: 0.32
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21 (Q9 17.8 @SF100)
+      complexity: 12.0          # typical of [3, 25] CSE
+      volume: 4.0               # typical of [0.5, 8] GB
+      weight: 0.45
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20 (Q13 33 CSE)
+      complexity: 20.0          # typical of [5, 35] CSE
+      volume: 0.75              # typical of [0.6, 0.9] GB
+      weight: 0.23
+
+llm:
+  slots: 16
+  input_tokens_per_s: 4000
+  output_tokens_per_s: 2000
+  ingress: fifo
+
+db:
+  topology: centralized         # swept: centralized | disaggregated
+  compute_nodes: 4              # disaggregated N (no-op on centralized)
+  storage_nodes: 2              # disaggregated M (striping axis)
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_gen4           # swept: ssd_gen4 | ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: grounded-workloads-sweep
+  factors:
+    db.topology: [centralized, disaggregated]
+    db.storage.backend: [ssd_gen4, ssd_enterprise]
+
+profiles:
+  mix_tpcc:                     # oltp_agent_tpcc_like
+    agents:
+      query_profiles:
+        - name: oltp_tx         # TPC-C New-Order/Payment
+          complexity: 0.02      # typical of [0.002, 0.05] CSE
+          volume: 0.0002        # typical of [0.00005, 0.0005] GB
+          weight: 0.88
+        - name: point_lookup    # TPC-C Order-Status/Stock-Level
+          complexity: 0.005     # typical of [0.001, 0.02] CSE
+          volume: 0.0001        # typical of [0.00001, 0.001] GB
+          weight: 0.12
+  mix_mixed:                    # mixed_agent_retrieval_analytics
+    agents:
+      query_profiles:
+        - name: point_lookup
+          complexity: 0.005
+          volume: 0.0001
+          weight: 0.45
+        - name: small_analytic
+          complexity: 1.5
+          volume: 0.5
+          weight: 0.20
+        - name: join_heavy
+          complexity: 12.0
+          volume: 4.0
+          weight: 0.10
+        - name: wide_scan_aggregate
+          complexity: 20.0
+          volume: 0.75
+          weight: 0.10
+        - name: oltp_tx
+          complexity: 0.02
+          volume: 0.0002
+          weight: 0.15
+  demo:                         # fast profile for test/dev (favored sweeps)
+    sim:
+      until: 30.0
+    agents:
+      count: 8

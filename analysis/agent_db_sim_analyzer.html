@@ -38,6 +38,7 @@
     border-radius:8px;cursor:pointer;color:var(--muted);background:var(--panel2)}
   .tab.on{border-color:var(--accent);color:var(--accent2);background:rgba(90,169,230,.09)}
   .hint{font-size:11.5px;color:var(--muted)}
+  .hintline{font-size:11.5px;color:var(--muted);margin:-3px 0 10px;max-width:60ch}
   .banner{display:none;border-radius:8px;padding:9px 14px;font-size:13px;margin-bottom:12px;border:1px solid}
   .banner.show{display:block}
   .banner.warn{border-color:var(--warn);color:var(--warn);background:rgba(229,180,90,.08)}
@@ -52,6 +53,8 @@
   .chartcard{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:13px 14px;margin-bottom:14px}
   .chartcard h3{font-size:13px;font-weight:600;margin:0 0 2px}
   .chartcard .note{font-size:12px;color:var(--muted);margin:0 0 8px}
+  .chartcard .read{font-size:12.5px;color:var(--text);margin:8px 0 0;padding-top:8px;border-top:1px dashed var(--border)}
+  .chartcard .read b{color:var(--accent2)}
   svg{display:block;width:100%;height:auto}
   table{border-collapse:collapse;width:100%;font-size:12.5px}
   th{color:var(--muted);font-weight:600;text-align:right;padding:5px 9px;border-bottom:1px solid var(--border)}
@@ -66,6 +69,11 @@
   details.assumptions li{margin-bottom:5px}
   code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:11.5px}
   .credit{font-size:11.5px;color:var(--muted);padding:0 28px 26px;max-width:1500px;margin:0 auto}
+  .flow{width:100%;height:auto}
+  .flow text{font-family:var(--mono)}
+  .maptable td:first-child{white-space:nowrap;color:var(--accent2)}
+  .steps{margin:6px 0 0;padding-left:18px}
+  .steps li{margin-bottom:5px}
 </style>
 </head>
 <body>
@@ -82,6 +90,39 @@
   <!-- ============ parameters ============ -->
   <section>
     <div class="card">
+      <h2>How to read this page</h2>
+      <svg class="flow" viewBox="0 0 560 150">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+          </marker>
+        </defs>
+        <rect x="14" y="52" width="92" height="44" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>
+        <text x="60" y="70" text-anchor="middle" fill="var(--text)" font-size="12">N agents</text>
+        <text x="60" y="86" text-anchor="middle" fill="var(--muted)" font-size="10">the loop closed</text>
+        <line x1="110" y1="62" x2="176" y2="62" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#arr)"/>
+        <text x="142" y="52" text-anchor="middle" fill="var(--warn)" font-size="10.5">think τ<tspan baseline-shift="sub" font-size="8">think</tspan></text>
+        <rect x="180" y="30" width="128" height="60" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>
+        <text x="244" y="50" text-anchor="middle" fill="var(--text)" font-size="12">LLM endpoint</text>
+        <text x="244" y="66" text-anchor="middle" fill="var(--muted)" font-size="10">τ<tspan baseline-shift="sub" font-size="8">LLM</tspan> per call · c<tspan baseline-shift="sub" font-size="8">LLM</tspan> servers</text>
+        <text x="244" y="80" text-anchor="middle" fill="var(--muted)" font-size="10">SCV c²<tspan baseline-shift="sub" font-size="8">s,LLM</tspan></text>
+        <line x1="312" y1="60" x2="378" y2="60" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#arr)"/>
+        <text x="344" y="50" text-anchor="middle" fill="var(--muted)" font-size="10">call</text>
+        <rect x="382" y="30" width="120" height="60" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>
+        <text x="442" y="50" text-anchor="middle" fill="var(--text)" font-size="12">DB endpoint</text>
+        <text x="442" y="66" text-anchor="middle" fill="var(--muted)" font-size="10">τ<tspan baseline-shift="sub" font-size="8">DB</tspan> per query · c<tspan baseline-shift="sub" font-size="8">DB</tspan> servers</text>
+        <text x="442" y="80" text-anchor="middle" fill="var(--muted)" font-size="10">SCV c²<tspan baseline-shift="sub" font-size="8">s,DB</tspan></text>
+        <path d="M 442 92 C 442 130 60 130 60 98" fill="none" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#arr)"/>
+        <text x="250" y="126" text-anchor="middle" fill="var(--muted)" font-size="10">response goes back; agent thinks, repeats</text>
+      </svg>
+      <ol class="steps">
+        <li>Every <b>parameter on the left plugs into exactly one box</b> of the loop above (think time on the arrow, τ/c/SCV inside its endpoint).</li>
+        <li>The engines compute what steady state looks like: <b>tiles</b> = the headline numbers, <b>charts</b> = the distributions, <b>table</b> = per-endpoint detail.</li>
+        <li>Use <b>Monte Carlo / Compare</b> to check the analytic estimates with a discrete-event simulation.</li>
+      </ol>
+    </div>
+
+    <div class="card">
       <h2>Mode</h2>
       <div class="tabs">
         <div class="tab on" id="tabA">Analytic</div>
@@ -97,11 +138,13 @@
         <label style="font-size:13px">N — concurrent agents</label>
         <input type="number" id="N" value="8" min="1" max="2000" step="1">
       </div>
+      <div class="hintline">How many agents run the loop at the same time. More agents = more load on both endpoints; this is the main "demand" dial against the fixed server capacities.</div>
       <input type="range" id="N_s" min="1" max="120" step="1" value="8">
       <div class="field" style="margin-top:8px">
         <label>τ<sub>think</sub> — mean think time <span class="sub">s · exponential delay per cycle</span></label>
         <input type="number" id="tauThink" value="2.0" min="0" max="600" step="0.1">
       </div>
+      <div class="hintline">The non-work time between an agent finishing one loop and starting the next. Long think time spreads agents out, lowering pressure. N × (1/τ<sub>think</sub>) roughly bounds how much load the agents can generate.</div>
     </div>
 
     <div class="card">
@@ -110,15 +153,18 @@
         <label>τ<sub>LLM</sub> — mean service <span class="sub">per call (s)</span></label>
         <input type="number" id="tauLLM" value="1.5" min="0.001" max="600" step="0.1">
       </div>
+      <div class="hintline">How long one call occupies one inference server on average (prompt processing time).</div>
       <div style="display:grid;grid-template-columns:1fr 96px;align-items:center">
         <label style="font-size:13px">c<sub>LLM</sub> — servers</label>
         <input type="number" id="cLLM" value="4" min="1" max="2000" step="1">
       </div>
+      <div class="hintline">How many calls the endpoint can process simultaneously (parallel capacity of the inference cluster). An arriving call that finds all c servers busy waits in a queue.</div>
       <input type="range" id="cLLM_s" min="1" max="64" step="1" value="4" style="margin-top:4px">
       <div class="field" style="margin-top:8px">
         <label>c²<sub>s,LLM</sub> — service SCV <span class="sub">1 = exponential · 0 = deterministic</span></label>
         <input type="number" id="csLLM" value="1.0" min="0" max="10" step="0.1">
       </div>
+      <div class="hintline">Jitter of the service time: SCV = variance/mean². 1 = fully random (exponential), 0 = always exactly τ (e.g. fixed token budget). More jitter → longer queues at the same average load.</div>
     </div>
 
     <div class="card">
@@ -127,15 +173,18 @@
         <label>τ<sub>DB</sub> — mean service <span class="sub">per query (s)</span></label>
         <input type="number" id="tauDB" value="0.3" min="0.001" max="600" step="0.05">
       </div>
+      <div class="hintline">How long one query occupies one DB server (compute+storage+network compressed into one number).</div>
       <div style="display:grid;grid-template-columns:1fr 96px;align-items:center">
         <label style="font-size:13px">c<sub>DB</sub> — servers</label>
         <input type="number" id="cDB" value="8" min="1" max="2000" step="1">
       </div>
+      <div class="hintline">How many queries the DB endpoint handles at once.</div>
       <input type="range" id="cDB_s" min="1" max="128" step="1" value="8" style="margin-top:4px">
       <div class="field" style="margin-top:8px">
         <label>c²<sub>s,DB</sub> — service SCV</label>
         <input type="number" id="csDB" value="1.0" min="0" max="10" step="0.1">
       </div>
+      <div class="hintline">Jitter of the query service time (data-dependent queries typically have SCV well above 1).</div>
     </div>
 
     <div class="card">
@@ -144,26 +193,32 @@
         <label>Grid points <span class="sub">percentile engine</span></label>
         <input type="number" id="gridN" value="2048" min="256" max="8192" step="128">
       </div>
+      <div class="hintline">Resolution of the numeric histogram that produces the percentiles. Higher = smoother curves, slightly slower.</div>
       <div class="field">
         <label>Horizon × mean latency</label>
         <input type="number" id="horizon" value="12" min="4" max="40" step="1">
       </div>
+      <div class="hintline">How far the distribution window extends past the mean (multiplied). Raise it if extreme tails (p99.9) matter or the banner warns about truncation.</div>
       <div class="field">
         <label>Sweep max agents</label>
         <input type="number" id="sweepMax" value="120" min="10" max="300" step="1">
       </div>
+      <div class="hintline">Furthest agent count drawn in the saturation sweep chart.</div>
       <div class="field">
         <label>MC cycles kept</label>
         <input type="number" id="mcN" value="20000" min="500" max="200000" step="500">
       </div>
+      <div class="hintline">How many completed loops the simulation records. More = steadier percentiles (error shrinks as 1/√n) but slower.</div>
       <div class="field">
         <label>MC warm-up fraction</label>
         <input type="number" id="mcWarm" value="0.1" min="0" max="0.5" step="0.01">
       </div>
+      <div class="hintline">Start-up transients are discarded; this is the share of early cycles thrown away before counting.</div>
       <div class="field" style="margin-bottom:0">
         <label>MC seed <span class="sub">0 = random each run</span></label>
         <input type="number" id="mcSeed" value="42" min="0" max="2147483647" step="1">
       </div>
+      <div class="hintline">Same seed + same parameters = identical simulated run (reproducibility). 0 reshuffles each Recompute.</div>
     </div>
 
     <button class="btn primary" id="recompute" style="width:100%;margin-bottom:14px">Recompute&nbsp;(incl. Monte&nbsp;Carlo)</button>
@@ -185,9 +240,30 @@
     </div>
 
     <div class="chartcard">
+      <details class="assumptions" style="background:var(--panel2);border:none;padding:10px 12px">
+        <summary>What the tiles mean</summary>
+        <table class="maptable">
+          <thead><tr><th>tile</th><th style="text-align:left">plain meaning</th></tr></thead>
+          <tbody>
+            <tr><td>p50 / p90 / p95 / p99</td><td style="text-align:left">Percentiles of the <b>whole loop time</b> (think + call + query + all waiting): p95 = 95% of cycles finish within this time. The gap between p50 and p99 tells you how spiky the agent experience is.</td></tr>
+            <tr><td>mean ± sd</td><td style="text-align:left">Average loop time and its natural spread.</td></tr>
+            <tr><td>throughput X</td><td style="text-align:left">Completed loops per second across the whole system. Also = the <b>arrival rate into every endpoint</b> (each loop hits each box exactly once — that's why one X feeds all stations).</td></tr>
+            <tr><td>ρ LLM / DB</td><td style="text-align:left">Per-server load at each endpoint = fraction of time a typical server is busy. ρ→1 means saturation: each extra agent adds queues faster than work finishes.</td></tr>
+            <tr><td>P(wait) LLM/DB</td><td style="text-align:left">Chance that a freshly arriving call/query finds <b>all servers busy</b> and must queue. High P(wait) with moderate ρ usually means too little capacity headroom or too much service jitter.</td></tr>
+          </tbody>
+        </table>
+      </details>
+    </div>
+
+    <div class="chartcard">
       <h3>Agent cycle-latency distribution</h3>
       <p class="note" id="latNote">think + LLM sojourn + DB sojourn · PDF (area) and CDF with percentile markers.</p>
       <div id="chartLat"></div>
+      <div class="read"><b>How to read:</b> the x-axis is the total wall-clock time of one full loop.
+        The shaded area (PDF) shows which latencies are common — its height is “how much probability mass sits here”.
+        The rising line (CDF) reads “the share of loops completing within x seconds”.
+        The dotted verticals mark p50/p90/p95/p99 on that CDF.
+        A long right tail = occasional agents stuck behind big queues; a narrow bump = stable, well-provisioned system.</div>
       <div class="legend">
         <span id="legAnalytic" style="display:none"><span class="sw" style="background:var(--accent)"></span>analytic</span>
         <span id="legMc"><span class="sw" style="background:var(--mcc)"></span>Monte Carlo</span>
@@ -199,6 +275,11 @@
       <h3>Saturation sweep — mean cycle latency vs. agent count</h3>
       <p class="note">Analytic engine · knee (steepest slope) and near-saturated points marked.</p>
       <div id="chartSweep"></div>
+      <div class="read"><b>How to read:</b> each point answers “what happens to everyone's loop time if we run
+        this many agents”. Flat start = spare capacity; the <b>warn-dot knee</b> = the agent count where latency
+        starts growing fastest (plan capacity below this); <b>red verticals</b> = counts where an endpoint is
+        ≥99.5% busy and loop time is running away. Horizontal distance between your current N and the knee
+        is your headroom.</div>
       <div class="legend">
         <span><span class="sw" style="background:var(--accent)"></span>mean latency</span>
         <span><span class="sw" style="background:var(--bad);height:2px"></span>saturated point</span>
@@ -209,6 +290,18 @@
     <div class="chartcard">
       <h3>Per-station breakdown</h3>
       <div id="tblWrap"><table><thead id="tblh"></thead><tbody id="tblb"></tbody></table></div>
+      <details class="assumptions" style="background:var(--panel2);border:none;padding:10px 12px;margin-top:8px">
+        <summary>Column meanings</summary>
+        <ul>
+          <li><b>λ = X</b> — arrival (= completion) rate at that endpoint, loops/s; identical for every endpoint by flow balance.</li>
+          <li><b>ρ/server</b> — per-server busy fraction; the <b>bottleneck is the row closest to 1.</b></li>
+          <li><b>P(wait&gt;0)</b> — how often arrivals find the endpoint busy.</li>
+          <li><b>W<sub>q</sub></b> — average pure <i>waiting</i> time in that queue (this is the amount you can shave by adding servers).</li>
+          <li><b>R = τ+W<sub>q</sub></b> — total time one call/query spends inside the endpoint (wait + service).</li>
+          <li><b>L<sub>q</sub></b> — average number of agents standing in that queue right now.</li>
+        </ul>
+        <div class="hint">Bottleneck rule of thumb: the row with max ρ gates the whole loop — adding capacity anywhere else helps much less.</div>
+      </details>
     </div>
 
     <details class="assumptions">

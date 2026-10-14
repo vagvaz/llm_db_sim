@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}agent-db-sim — live{% endblock %}</title>
+  {% block head %}{% endblock %}
+  <link rel="stylesheet" href="/static/live.css">
+</head>
+<body class="live-body">
+<div class="frame">
+  <header class="top">
+    <div class="brand">
+      <span class="mark">◉</span>
+      <h1>agent-db-sim <em>live</em></h1>
+    </div>
+    <nav class="links">
+      <a href="/">waveform</a>
+      <a href="/live" class="here">live</a>
+      <a href="/reports">reports</a>
+      <a href="/vcd">raw VCD</a>
+    </nav>
+    <div class="hud">
+      <div id="pill" class="pill idle">idle</div>
+      <div class="clock"><span class="lab">sim&nbsp;t</span><span id="clock">—</span></div>
+      <div class="progress"><div id="bar"></div></div>
+    </div>
+  </header>
+
+  <main class="grid">
+    <aside class="panel" id="controls">
+      <div class="panel-head">
+        <span class="dotline"></span>
+        <h2>launch a run</h2>
+      </div>
+      <form id="runform" autocomplete="off">
+        <label class="fld wide">
+          <span>scenario</span>
+          <select id="scenario"><option value="">loading…</option></select>
+        </label>
+        <div class="pair">
+          <label class="fld"><span>agents</span>
+            <input type="number" id="agents.count" min="1" step="1" placeholder="—"></label>
+          <label class="fld"><span>llm slots</span>
+            <input type="number" id="llm.slots" min="1" step="1" placeholder="—"></label>
+        </div>
+        <div class="pair">
+          <label class="fld"><span>tok/s in</span>
+            <input type="number" id="llm.input_tokens_per_s" min="1" step="1" placeholder="—"></label>
+          <label class="fld"><span>tok/s out</span>
+            <input type="number" id="llm.output_tokens_per_s" min="1" step="1" placeholder="—"></label>
+        </div>
+        <div class="pair">
+          <label class="fld"><span>topology</span>
+            <select id="db.topology">
+              <option value="">—</option>
+              <option>centralized</option>
+              <option>disaggregated</option>
+              <option>distributed</option>
+            </select></label>
+          <label class="fld"><span>backend</span>
+            <select id="db.storage.backend">
+              <option value="">—</option>
+              <option>ram</option><option>nvme</option>
+              <option>ssd</option><option>disk</option>
+            </select></label>
+        </div>
+        <div class="pair">
+          <label class="fld"><span>compute&nbsp;N</span>
+            <input type="number" id="db.compute_nodes" min="1" step="1" placeholder="—"></label>
+          <label class="fld"><span>storage&nbsp;M</span>
+            <input type="number" id="db.storage_nodes" min="1" step="1" placeholder="—"></label>
+        </div>
+        <label class="fld"><span>sim.until</span>
+          <input type="number" id="sim.until" min="1" step="1" placeholder="—"></label>
+        <div class="actions">
+          <button type="submit" id="launch">▶ launch live run</button>
+        </div>
+        <p id="form-msg" class="msg"></p>
+      </form>
+
+      <div class="panel-head">
+        <span class="dotline"></span>
+        <h2>playback</h2>
+      </div>
+      <div class="speed" id="speed">
+        <button data-s="1" class="on">1×</button>
+        <button data-s="2">2×</button>
+        <button data-s="5">5×</button>
+        <button data-s="20">20×</button>
+        <button data-s="999">max</button>
+      </div>
+      <div class="legend">
+        <p><i class="sw queued"></i>queued <i class="sw processing"></i>processing
+          <i class="sw completed"></i>done <i class="sw transfer"></i>in flight</p>
+        <p class="hint">cylinders are queues (depth), bars are slot occupancy,
+          dots are requests riding the wiring. The view plays streamed samples
+          on its own sim-clock; it pauses when the run ends.</p>
+      </div>
+      <div id="finish" class="finish hidden"></div>
+    </aside>
+
+    <section class="stage" id="stage">
+      <svg id="topo" viewBox="0 0 1300 720" preserveAspectRatio="xMidYMid meet"></svg>
+      <div id="tooltip" class="tooltip hidden"></div>
+    </section>
+  </main>
+</div>
+<script src="/static/live.js" defer></script>
+</body>
+</html>

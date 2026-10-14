@@ -11,6 +11,12 @@
 - ``GET /sweeps/<s>``   sweep-comparison report over that sweep root
                         (default template ``sweep_compare``)
 - ``GET /sweeps/<s>/reports/<t>``  sweep report with an explicit template
+- ``GET /live``         animated component view + parameter form
+- ``GET /live/scenarios`` scenario picker entries (JSON)
+- ``POST /live/run``    launch one live run (rejects concurrent runs, 409)
+- ``GET /live/state``   live-run slot status (JSON)
+- ``GET /live/stream``  SSE: live ``metrics.db`` sample rows -> ``delta`` events
+- ``GET /live/run/<id>/report`` / ``.../vcd``  artifacts of a finished live run
 
 SSE tail discipline per ticket 01: the server holds back the newest
 ``#timestamp`` block (it may still be mid-write); clients only ever see
@@ -30,6 +36,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from agent_db_sim.viz.live import (
+    LiveBusy,
+    LiveError,
+    LiveManager,
+    SamplesTail,
+)
 from agent_db_sim.viz.report import (
     render_report,
     render_reports_index,
@@ -39,7 +51,7 @@ from agent_db_sim.viz.report import (
 )
 from agent_db_sim.viz.vcd import QUANTA, VcdTailer, parse_vcd_bytes
 
-__all__ = ["create_app", "sse_events", "VCD_NAME", "METRICS_NAME"]
+__all__ = ["create_app", "sse_events", "live_sse_events", "VCD_NAME", "METRICS_NAME"]
 
 VCD_NAME = "run.vcd"
 METRICS_NAME = "metrics.db"
@@ -56,19 +68,38 @@ def _sse(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
-def create_app(run_dir: Any, sweeps_root: Optional[str] = None) -> FastAPI:
+def create_app(
+    run_dir: Any,
+    sweeps_root: Optional[str] = None,
+    live_root: Optional[str] = None,
+    scenarios_root: Optional[str] = None,
+    live_poll: float = POLL_INTERVAL,
+) -> FastAPI:
     """Build the visualization app around one run directory.
 
     ``sweeps_root`` scopes ``GET /sweeps`` discovery; it defaults to the
     run dir's parent (the usual ``runs/`` layout, where sweep roots —
     directories holding ``sweep_summary.json`` and per-run ``metrics.db``
     dirs — are siblings of the served run).
+
+    ``live_root`` / ``scenarios_root`` scope the ``/live`` animated view:
+    where launched runs land (``runs/live/<run_id>/`` by default) and the
+    scenario picker's directory (the repo-root ``scenarios/`` by default).
     """
     run_dir = Path(run_dir)
     vcd_path = run_dir / VCD_NAME
     sweeps_root = Path(sweeps_root) if sweeps_root is not None else run_dir.parent
+    if live_root is None:
+        live_root = run_dir.parent / "live"
+    if scenarios_root is None:
+        guess = Path(__file__).resolve().parents[3] / "scenarios"
+        scenarios_root = str(guess) if guess.is_dir() else None
+    live = LiveManager(
+        Path(live_root), Path(scenarios_root) if scenarios_root else None
+    )
 
     app = FastAPI(title="agent-db-sim viz", version="0.1.0")
+    app.state.live = live
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     templates = Jinja2Templates(directory=str(templates_dir))
 
@@ -216,6 +247,71 @@ def create_app(run_dir: Any, sweeps_root: Optional[str] = None) -> FastAPI:
     def sweep_report(sweep: str, template: str) -> Response:
         return _render_sweep(sweep, template)
 
+    # -- live animated view ------------------------------------------------ #
+    @app.get("/live")
+    def live_page(request: Request):
+        return templates.TemplateResponse(request, "live.html")
+
+    @app.get("/live/scenarios")
+    def live_scenarios() -> JSONResponse:
+        return JSONResponse({"scenarios": live.scenarios()})
+
+    @app.get("/live/state")
+    def live_state() -> JSONResponse:
+        return JSONResponse(live.refresh())
+
+    @app.post("/live/run")
+    async def live_run(request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        scenario = payload.get("scenario")
+        overrides = payload.get("overrides") or {}
+        if not isinstance(overrides, dict):
+            raise HTTPException(status_code=422, detail="overrides must be an object")
+        try:
+            st = live.start(scenario, overrides)
+        except LiveBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except LiveError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return JSONResponse(st.public(), status_code=202)
+
+    @app.get("/live/stream")
+    def live_stream() -> Response:
+        return StreamingResponse(
+            live_sse_events(live, poll_interval=live_poll),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    def _live_run_dir(run_id: str) -> Path:
+        candidate = (live.live_root / run_id).resolve()
+        if candidate.parent != live.live_root.resolve():
+            raise _not_found(f"no live run {run_id!r}")
+        if not candidate.is_dir():
+            raise _not_found(f"no live run {run_id!r}")
+        return candidate
+
+    @app.get("/live/run/{run_id}/report")
+    def live_report(run_id: str) -> FileResponse:
+        report = _live_run_dir(run_id) / "report.html"
+        if not report.exists():
+            raise _not_found(f"no report for live run {run_id!r} yet")
+        return FileResponse(report, media_type="text/html")
+
+    @app.get("/live/run/{run_id}/vcd")
+    def live_vcd(run_id: str) -> FileResponse:
+        vcd = _live_run_dir(run_id) / VCD_NAME
+        if not vcd.exists():
+            raise _not_found(f"no {VCD_NAME} for live run {run_id!r} yet")
+        return FileResponse(
+            vcd, media_type="application/octet-stream", filename=vcd.name
+        )
+
     return app
 
 
@@ -303,3 +399,72 @@ def sse_events(
             yield ": keepalive\n\n"
     finally:
         tailer.close()
+
+
+def live_sse_events(
+    live: LiveManager,
+    poll_interval: float = POLL_INTERVAL,
+    fast: bool = False,
+) -> Iterator[str]:
+    """SSE pipeline for the live view: ``init`` state, per-connection ``delta``
+    batches of ``metrics.db`` sample rows (``[t, signal, kind, value, tags]``),
+    then ``done`` once the run process finishes.
+
+    Each connection tails the samples table from row 0, so a tab that joins
+    mid-run catches up first and then follows the stream; a finished run is
+    drained in full and ends immediately (replay).
+    """
+    wait = 0.02 if fast else poll_interval
+    live._sync()  # noqa: SLF001 - same-package state refresh
+    st = live.state
+    if st is None:
+        yield _sse("error", {"detail": "no live run launched yet"})
+        yield _sse("done", {"reason": "idle"})
+        return
+
+    yield _sse("init", st.public())
+    tail = SamplesTail(st.run_dir / METRICS_NAME)  # per-connection cursor
+    try:
+        while True:
+            drained = False
+            while True:
+                rows = tail.since()
+                if not rows:
+                    break
+                drained = True
+                st.latest_t = max(st.latest_t, max(float(r[1]) for r in rows))
+                yield _sse(
+                    "delta",
+                    {"rows": [[r[1], r[2], r[3], r[4], r[5]] for r in rows]},
+                )
+            live._sync()  # noqa: SLF001
+            if st.status in ("done", "error"):
+                # final drain: the process is gone, all batches are committed
+                final = tail.since()
+                if final:
+                    st.latest_t = max(st.latest_t, max(float(r[1]) for r in final))
+                    yield _sse(
+                        "delta",
+                        {
+                            "rows": [
+                                [r[1], r[2], r[3], r[4], r[5]] for r in final
+                            ]
+                        },
+                    )
+                payload = {
+                    "reason": st.status,
+                    "run_id": st.run_id,
+                    "t_max": st.latest_t,
+                }
+                if st.status == "done":
+                    payload["report"] = f"/live/run/{st.run_id}/report"
+                    payload["vcd"] = f"/live/run/{st.run_id}/vcd"
+                if st.error:
+                    payload["error"] = st.error
+                yield _sse("done", payload)
+                return
+            if not drained:
+                yield ": keepalive\n\n"
+            time.sleep(wait)
+    finally:
+        tail.close()

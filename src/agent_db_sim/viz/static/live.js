@@ -1,0 +1,592 @@
+/* agent-db-sim — live animated component view.
+ *
+ * Streams ``metrics.db`` sample rows over SSE and plays them back on its own
+ * sim-clock: request dots ride the topology wiring, queue cylinders fill with
+ * ``queue_depth`` levels, slot bars light with ``slot_busy`` occupancy, links
+ * glow on network activity. Playback freezes on the run's final frame.
+ */
+(function () {
+  "use strict";
+
+  var NS = "http://www.w3.org/2000/svg";
+  var svg = document.getElementById("topo");
+  function $(id) { return document.getElementById(id); }
+  function el(tag, attrs, parent) {
+    var n = document.createElementNS(NS, tag);
+    for (var k in (attrs || {})) n.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(n);
+    return n;
+  }
+  function txt(parent, cls, x, y, s, anchor) {
+    var t = el("text", { x: x, y: y, class: cls,
+      "text-anchor": anchor || "start" }, parent);
+    t.textContent = s;
+    return t;
+  }
+  function titleOf(node, s) { el("title", {}, node).textContent = s; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function curve(x1, y1, x2, y2) {
+    if (Math.abs(x2 - x1) >= Math.abs(y2 - y1)) {
+      var mx = (x1 + x2) / 2;
+      return "M" + x1 + " " + y1 + " C " + mx + " " + y1 + ", " + mx + " " + y2 +
+        ", " + x2 + " " + y2;
+    }
+    var my = (y1 + y2) / 2;
+    return "M" + x1 + " " + y1 + " C " + x1 + " " + my + ", " + x2 + " " + my +
+      ", " + x2 + " " + y2;
+  }
+
+  var C = {
+    idle: "#3a4252", queued: "#ffb454", processing: "#4cc9f0",
+    completed: "#3fd68f", transfer: "#b28dff",
+  };
+
+  /* ------------------------------------------------------------------ */
+  var S = {
+    speed: 1, queue: [], qi: 0, cursor: null, lastT: 0,
+    streamDone: false, playing: false, error: null, runId: null, until: 0,
+    counters: { tokens_in: 0, tokens_out: 0 }, dots: [],
+  };
+  var MAX_AGENTS = 10, MAX_SLOTS = 16, MAX_NODES = 4;
+  var M = null, SC = null;
+
+  /* ------------------------------------------------------------------ */
+  /* topology model                                                      */
+  /* ------------------------------------------------------------------ */
+  function buildModel(cfg) {
+    var m = {
+      agentCount: cfg.agents.count,
+      llm: { name: "llm", slots: cfg.llm.slots, queue: 0, queueTarget: 0,
+        busy: 0, busyTarget: 0, requests: 0, served: 0, agents: [] },
+      db: { topology: cfg.db.topology, backend: cfg.db.backend,
+        compute: [], storage: [] },
+      rates: { in: cfg.llm.input_tokens_per_s, out: cfg.llm.output_tokens_per_s },
+    };
+    var nComp = cfg.db.topology === "centralized" ? 1
+      : clamp(cfg.db.compute_nodes, 1, MAX_NODES);
+    var nSto = cfg.db.topology === "centralized" ? 1
+      : clamp(cfg.db.storage_nodes || 1, 1, MAX_NODES);
+    for (var i = 0; i < nComp; i++)
+      m.db.compute.push({ name: "compute-" + i, stripe: 0, queue: 0,
+        queueTarget: 0, busy: 0, busyTarget: 0, served: 0 });
+    for (var j = 0; j < nSto; j++)
+      m.db.storage.push({ name: "storage-" + j, queue: 0, queueTarget: 0,
+        busy: 0, busyTarget: 0 });
+    return m;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* SVG primitives: queue cylinder + slot bars                          */
+  /* ------------------------------------------------------------------ */
+  function cylinder(parent, x, y, w, h, label) {
+    var g = el("g", { class: "node cyl" }, parent);
+    var ry = clamp(w / 5, 5, 9);
+    var top = y + ry / 2, bottom = y + h - ry / 2;
+    var bodyD = "M" + x + " " + top + " v" + (h - ry) + " a" + (w / 2) + " " +
+      (ry / 2) + " 0 0 0 " + w + " 0 v" + -(h - ry);
+    el("path", { class: "cyl-body", d: bodyD }, g);
+    var fill = el("rect", { class: "cyl-fill", x: x + 2, y: bottom, width: w - 4,
+      height: 0 }, g);
+    var clipId = "clip" + Math.random().toString(36).slice(2, 9);
+    var clip = el("clipPath", { id: clipId }, g);
+    el("path", { d: bodyD + " a" + (w / 2) + " " + (ry / 2) + " 0 0 0 " + (-w) +
+      " 0 z" }, clip);
+    fill.setAttribute("clip-path", "url(#" + clipId + ")");
+    el("ellipse", { class: "cyl-top", cx: x + w / 2, cy: top, rx: w / 2, ry: ry / 2 }, g);
+    var val = txt(g, "n-val", x + w / 2, y + h + 14, "0", "middle");
+    txt(g, "n-sub", x + w / 2, y + h + 29, label, "middle");
+    return { g: g, fill: fill, val: val, top: top, bottom: bottom, bodyH: h - ry,
+      max: 2 };
+  }
+  function setFill(cyl, depth) {
+    var frac = clamp(depth / cyl.max, 0, 1);
+    var hh = frac * cyl.bodyH;
+    cyl.fill.setAttribute("y", cyl.bottom - hh);
+    cyl.fill.setAttribute("height", Math.max(hh, 0.001));
+    cyl.val.textContent = String(Math.round(depth * 10) / 10);
+  }
+  function slotRow(parent, x, y, n, w, gap, hgt) {
+    var bars = [];
+    var g = el("g", {}, parent);
+    el("rect", { x: x - 3, y: y - 2, width: n * (w + gap) + 2, height: hgt + 4,
+      rx: 3, fill: "#0c1220", stroke: "#1c2532" }, g);
+    var bh = hgt - 8;
+    for (var i = 0; i < n; i++) {
+      var b = el("rect", { class: "slot", x: x + i * (w + gap), y: y + hgt - 6,
+        width: w, height: 0.001, rx: 1.5 }, g);
+      b._baseBottom = y + hgt - 6 + 0.001;
+      b._bh = bh;
+      bars.push(b);
+    }
+    return bars;
+  }
+  function setSlots(bars, busy) {
+    for (var i = 0; i < bars.length; i++) {
+      var frac = clamp(busy - i, 0, 1);
+      var b = bars[i], hh = frac * b._bh;
+      var bottom = b._baseBottom;
+      b.setAttribute("height", Math.max(hh, 0.001));
+      b.setAttribute("y", bottom - Math.max(hh, 0.001));
+      b.classList.toggle("busy", frac > 0.03);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* scene                                                               */
+  /* ------------------------------------------------------------------ */
+  function renderScene() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var defs = el("defs", {}, svg);
+    var grad = el("linearGradient", { id: "qgrad", x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+    el("stop", { offset: "0%", "stop-color": "#ffd27a" }, grad);
+    el("stop", { offset: "100%", "stop-color": "#ff9d2e" }, grad);
+    var filt = el("filter", { id: "glow", x: "-80%", y: "-80%", width: "260%",
+      height: "260%" }, defs);
+    el("feGaussianBlur", { stdDeviation: 3, result: "b" }, filt);
+    var mg = el("feMerge", {}, filt);
+    el("feMergeNode", { in: "b" }, mg);
+    el("feMergeNode", { in: "SourceGraphic" }, mg);
+
+    var grid = el("g", { class: "gridlines" }, svg);
+    for (var gx = 0; gx <= 1300; gx += 65) el("line", { x1: gx, y1: 0, x2: gx, y2: 720 }, grid);
+    for (var gy = 0; gy <= 720; gy += 60) el("line", { x1: 0, y1: gy, x2: 1300, y2: gy }, grid);
+    txt(svg, "frame-note", 16, 24, "live topology — agent ⇄ llm ⇄ db");
+
+    /* agents */
+    var shown = Math.min(M.agentCount, MAX_AGENTS);
+    var ax = 46, ay = 100, aw = 116, ah = 40, agap = 14;
+    var agG = el("g", {}, svg);
+    txt(agG, "n-sub", ax, ay - 14, "agent pool · ×" + M.agentCount);
+    for (var i = 0; i < shown; i++) {
+      var y = ay + i * (ah + agap);
+      var g = el("g", { class: "node agent" }, agG);
+      var r = el("rect", { x: ax, y: y, width: aw, height: ah, rx: 8 }, g);
+      txt(g, "n-title", ax + 12, y + 25, "agent-" + i);
+      var dot = el("circle", { class: "state-dot", cx: ax + aw - 14, cy: y + ah / 2,
+        r: 5, fill: C.idle }, g);
+      titleOf(g, "agent-" + i + " — closed-loop: inference then grounded db query");
+      M.llm.agents.push({ g: g, r: r, dot: dot, x: ax + aw, y: y + ah / 2 });
+    }
+    if (M.agentCount > shown)
+      txt(agG, "n-sub", ax, ay + shown * (ah + agap) + 4,
+        "+" + (M.agentCount - shown) + " more (round-robin)");
+
+    /* LLM endpoint */
+    var lx = 320, ly = 130, lw = 230, lh = 420;
+    var lg = el("g", { class: "node" }, svg);
+    el("rect", { x: lx, y: ly, width: lw, height: lh, rx: 12, fill: "#16202e",
+      stroke: "#232c3b" }, lg);
+    txt(lg, "n-title", lx + 14, ly + 28, "llm.server");
+    txt(lg, "n-sub", lx + 14, ly + 46, "in " + Math.round(M.rates.in) +
+      " · out " + Math.round(M.rates.out) + " tok/s");
+    M.llm.cyl = cylinder(lg, lx + 26, ly + 72, 62, 170, "ingress");
+    var nb = Math.min(M.llm.slots, MAX_SLOTS);
+    txt(lg, "n-sub", lx + 108, ly + 90, "slots · " + M.llm.slots +
+      (M.llm.slots > nb ? " (" + nb + " shown)" : ""));
+    M.llm.bars = slotRow(lg, lx + 108, ly + 100, nb,
+      clamp(Math.floor(110 / nb), 6, 22), 4, 140);
+    M.llm.counterTxt = txt(lg, "n-val", lx + 14, ly + lh - 44, "in 0 · out 0");
+    M.llm.flowTxt = txt(lg, "n-val", lx + 14, ly + lh - 22, "req 0 · served 0");
+
+    /* DB endpoint shell */
+    var dbX = 640, dbY = 70, dbW = 634, dbH = 590;
+    var dbg = el("g", {}, svg);
+    el("rect", { x: dbX, y: dbY, width: dbW, height: dbH, rx: 16, fill: "none",
+      stroke: "#1b2534", "stroke-dasharray": "3 7" }, dbg);
+    txt(dbg, "n-sub", dbX + 14, dbY + 24, "db endpoint · " + M.db.topology +
+      " · backend " + M.db.backend);
+
+    var cw = M.db.compute.length === 1 ? 190 : 128, ch = 250;
+    var cx0 = dbX + 36, cy0 = dbY + 56;
+    var cstep = M.db.compute.length > 1
+      ? (dbW - 72 - cw) / (M.db.compute.length - 1) : 0;
+    M.db.compute.forEach(function (c, i) {
+      c.x = cx0 + i * cstep; c.y = cy0;
+      var g = el("g", { class: "node" }, dbg);
+      el("rect", { x: c.x, y: c.y, width: cw, height: ch, rx: 10, fill: "#151d2a",
+        stroke: "#232c3b" }, g);
+      txt(g, "n-title", c.x + 12, c.y + 26, c.name);
+      c.cyl = cylinder(g, c.x + 16, c.y + 44, 50, 130, "ingress");
+      var ns = Math.min(6, MAX_SLOTS);
+      txt(g, "n-sub", c.x + 82, c.y + 56, "compute slots");
+      c.bars = slotRow(g, c.x + 82, c.y + 66, ns, Math.max(6, (cw - 100) / ns - 4), 4, 108);
+      c.servedTxt = txt(g, "n-val", c.x + 12, c.y + ch - 12, "served 0");
+      titleOf(g, c.name + " — db query compute node");
+    });
+
+    var sw = M.db.storage.length === 1 ? 190 : 128, sh = 230;
+    var sy0 = cy0 + ch + 90;
+    var sstep = M.db.storage.length > 1
+      ? (dbW - 72 - sw) / (M.db.storage.length - 1) : 0;
+    M.db.storage.forEach(function (s, j) {
+      s.x = dbX + 36 + j * sstep; s.y = sy0;
+      var g = el("g", { class: "node" }, dbg);
+      el("rect", { x: s.x, y: s.y, width: sw, height: sh, rx: 10, fill: "#151d2a",
+        stroke: "#232c3b" }, g);
+      txt(g, "n-title", s.x + 12, s.y + 26, s.name);
+      s.cyl = cylinder(g, s.x + 16, s.y + 44, 50, 120, M.db.backend + " queue");
+      txt(g, "n-sub", s.x + 82, s.y + 56, "service");
+      s.bars = slotRow(g, s.x + 82, s.y + 66, 4, Math.max(6, (sw - 100) / 4 - 4), 4, 98);
+      s.busyTxt = txt(g, "n-val", s.x + 12, s.y + sh - 12, "idle");
+      titleOf(g, s.name + " — " + M.db.backend + " storage node");
+    });
+
+    /* links */
+    var edges = el("g", {}, svg);
+    SC = { links: {}, dotsLayer: null };
+    function link(id, d, label, px, py) {
+      var p = el("path", { class: "edge", d: d, id: id }, edges);
+      SC.links[id] = { path: p, glow: 0 };
+      if (label) txt(edges, "linklabel", px, py, label, "middle");
+    }
+    var aMid = M.llm.agents.length
+      ? M.llm.agents[Math.floor(M.llm.agents.length / 2)].y : ay + ah / 2;
+    link("ag-llm", curve(ax + aw, aMid, lx, ly + lh / 2), "submit", (ax + aw + lx) / 2,
+      aMid - 10);
+    // return lane leaves the LLM left edge and arcs back to the agent column
+    link("llm-ag", "M" + lx + " " + (ly + lh - 70) +
+      " C " + ((ax + aw + lx) / 2) + " " + (ly + lh - 40) + ", " +
+      ((ax + aw + lx) / 2) + " " + (aMid + ah + 20) + ", " + (ax + aw) + " " +
+      (aMid + ah / 2), "return", (ax + aw + lx) / 2 - 6, ly + lh - 44);
+    // agent ⇄ db grounded-query legs: two parallel arcs over the LLM block
+    link("ag-db", "M" + (ax + aw) + " " + (ay - 30) +
+      " C " + ((ax + aw + lx) / 2) + " " + (ay - 78) + ", " + (lx + lw + 60) + " " +
+      (ly - 78) + ", " + dbX + " " + (ly - 30), "query", (lx + lw + dbX) / 2 - 40,
+      ly - 92);
+    link("db-ag", "M" + dbX + " " + (ly - 8) +
+      " C " + (lx + lw + 60) + " " + (ly - 34) + ", " + ((ax + aw + lx) / 2) + " " +
+      (ay - 30) + ", " + (ax + aw) + " " + (ay - 12), "result",
+      (lx + lw + dbX) / 2 - 40, ly - 50);
+    M.db.compute.forEach(function (c, i) {
+      M.db.storage.forEach(function (s, j) {
+        link("link-" + i + "-" + j,
+          curve(c.x + cw / 2 - 20, c.y + ch, s.x + sw / 2 - 20, s.y),
+          null, 0, 0);
+      });
+    });
+    SC.dotsLayer = el("g", {}, svg);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* row -> model                                                        */
+  /* ------------------------------------------------------------------ */
+  /* metrics.db row shapes (see TraceWriter):
+   *  level   : signal is the bare metric ("queue_depth","slot_busy",
+   *            "conn_busy"); the component lives in tags.component
+   *  edge    : signal is "{component}.{stage}"; state/agent/request in tags
+   *  counter : signal is "tokens_input"/"tokens_output" (possibly prefixed)
+   *            or bare "requests"/"served" with tags.component            */
+  function shortName(name) { return name.replace(/^agent_db_sim\./, ""); }
+
+  function classify(comp) {
+    if (/link-(\d+)-(\d+)/.test(comp)) return { kind: "link" };
+    if (/llm/.test(comp)) return { kind: "llm" };
+    if (/\.storage$/.test(comp) || /storage-\d+/.test(comp)) {
+      var sm = comp.match(/(?:compute|node)-(\d+)/);
+      var jm = comp.match(/storage-(\d+)/);
+      return { kind: "storage", idx: jm ? +jm[1] : (sm ? +sm[1] : 0) };
+    }
+    var m = comp.match(/(?:compute|node)-(\d+)/);
+    if (m) return { kind: "compute", idx: +m[1] };
+    return { kind: "other" };
+  }
+
+  function nodeOf(key) {
+    if (key.kind === "llm") return M.llm;
+    if (key.kind === "compute") return M.db.compute[key.idx % M.db.compute.length];
+    if (key.kind === "storage") return M.db.storage[key.idx % M.db.storage.length];
+    return null;
+  }
+
+  function applyRow(row) {
+    var name = shortName(row[1]), kind = row[2], value = row[3], tags = row[4] || {};
+    var segs = name.split("."), leaf = segs[segs.length - 1];
+    var comp = kind === "edge" ? segs.slice(0, -1).join(".") : (tags.component || "");
+
+    if (kind === "level") {
+      if (leaf === "conn_busy" || leaf === "level") {
+        var lm = comp.match(/link-(\d+)-(\d+)/);
+        if (lm && SC && SC.links) {
+          var lk = SC.links["link-" + lm[1] + "-" + lm[2]];
+          if (lk) lk.glow = Math.max(lk.glow, Number(value) || 1);
+        }
+        return;
+      }
+      var n = nodeOf(classify(comp));
+      if (!n) return;
+      var v = Number(value) || 0;
+      if (leaf === "queue_depth") {
+        n.queueTarget = v;
+        if (n.cyl) n.cyl.max = Math.max(n.cyl.max, v);
+      } else if (leaf === "slot_busy") n.busyTarget = v;
+      else if (leaf === "requests") n.requests = v;
+      else if (leaf === "served") n.served = v;
+      return;
+    }
+    if (kind === "counter") {
+      if (leaf === "tokens_input" || leaf === "tokens_output") {
+        if (typeof value === "number")
+          S.counters[leaf === "tokens_input" ? "tokens_in" : "tokens_out"] += value;
+        return;
+      }
+      var nc = nodeOf(classify(comp || segs.slice(0, -1).join(".")));
+      if (!nc) return;
+      if (leaf === "requests") nc.requests += Number(value) || 0;
+      else if (leaf === "served") nc.served += Number(value) || 0;
+      return;
+    }
+    if (kind === "edge") {
+      var stage = leaf.replace(/_state$/, "");
+      var state = String(tags.state !== undefined ? tags.state : value).replace(/^"|"$/g, "");
+      var am = comp.match(/agent-(\d+)/);
+      handleStage(stage, state, am ? +am[1] : null, classify(comp));
+    }
+  }
+
+  function handleStage(stage, state, agentIdx, key) {
+    var ag = agentIdx !== null
+      ? M.llm.agents[agentIdx % M.llm.agents.length] : null;
+    if (stage === "inference" && ag) {
+      if (state === "submitted") { spawnDot("ag-llm", C.transfer); setAgent(ag, C.transfer); }
+      else if (state === "received") { spawnDot("llm-ag", C.completed); setAgent(ag, C.completed); }
+    } else if (stage === "db" && ag) {
+      if (state === "submitted") { spawnDot("ag-db", C.processing); setAgent(ag, C.processing); }
+      else if (state === "received") { spawnDot("db-ag", C.completed); setAgent(ag, C.completed); }
+    } else if (stage === "compute_issue" && state === "completed" &&
+               key.kind === "compute" && M.db.compute.length) {
+      var c = M.db.compute[key.idx % M.db.compute.length];
+      var j = c.stripe++ % M.db.storage.length;
+      spawnDot("link-" + (key.idx % M.db.compute.length) + "-" + j, C.queued);
+    }
+  }
+
+  function setAgent(ag, color) {
+    ag.dot.setAttribute("fill", color);
+    ag.r.setAttribute("stroke", color);
+    clearTimeout(ag._to);
+    ag._to = setTimeout(function () {
+      ag.dot.setAttribute("fill", C.idle); ag.r.removeAttribute("stroke");
+    }, 1400);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* dots                                                                */
+  /* ------------------------------------------------------------------ */
+  function spawnDot(linkId, color) {
+    if (!SC || !SC.links[linkId]) return;
+    var path = SC.links[linkId].path;
+    var c = el("circle", { class: "req-dot", r: 4.5, fill: color,
+      filter: "url(#glow)" }, SC.dotsLayer);
+    S.dots.push({ c: c, path: path, len: path.getTotalLength(),
+      t0: performance.now(), dur: clamp(1600 / S.speed, 130, 1600) });
+    if (S.dots.length > 150) {
+      var old = S.dots.shift();
+      if (old.c.parentNode) old.c.parentNode.removeChild(old.c);
+    }
+    SC.links[linkId].glow = Math.max(SC.links[linkId].glow, 0.7);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* playback loop                                                       */
+  /* ------------------------------------------------------------------ */
+  var lastFrame = 0;
+  function frame(now) {
+    if (!S.playing) return;
+    var dt = Math.min((now - lastFrame) / 1000, 0.25); lastFrame = now;
+    if (S.cursor === null && S.queue.length) S.cursor = S.queue[0][0];
+    if (S.cursor !== null) {
+      var target = S.cursor + dt * S.speed;
+      if (target > S.lastT) target = S.lastT;
+      while (S.qi < S.queue.length && S.queue[S.qi][0] <= target) applyRow(S.queue[S.qi++]);
+      S.cursor = target;
+      if (S.streamDone && S.cursor >= S.lastT) { freezeAtEnd(); paint(dt); return; }
+    }
+    paint(dt);
+    requestAnimationFrame(frame);
+  }
+
+  function ease(cur, tgt, dt) { return cur + (tgt - cur) * (1 - Math.exp(-3.2 * dt)); }
+
+  function paint(dt) {
+    [M.llm].concat(M.db.compute, M.db.storage).forEach(function (n) {
+      if (!n) return;
+      n.queue = ease(n.queue, n.queueTarget, dt);
+      if (n.cyl) {
+        // adaptive scale: snap up on new peaks, drift down (~8 s) so an
+        // early burst doesn't permanently flatten later queueing
+        if (n.queue > n.cyl.max) n.cyl.max = n.queue;
+        else n.cyl.max = Math.max(
+          n.queue,
+          n.cyl.max + (Math.max(n.queueTarget, 1) - n.cyl.max) * (1 - Math.exp(-dt / 8))
+        );
+        setFill(n.cyl, n.queue);
+      }
+      n.busy = ease(n.busy, n.busyTarget, dt);
+      setSlots(n.bars, n.busy);
+    });
+    if (M.llm.flowTxt) M.llm.flowTxt.textContent =
+      "req " + Math.round(M.llm.requests || 0) + " · served " + Math.round(M.llm.served || 0);
+    if (M.llm.counterTxt) M.llm.counterTxt.textContent =
+      "in " + Math.round(S.counters.tokens_in) + " · out " + Math.round(S.counters.tokens_out);
+    M.db.compute.forEach(function (c) {
+      if (c.servedTxt) c.servedTxt.textContent = "served " + Math.round(c.served || 0);
+    });
+    M.db.storage.forEach(function (s) {
+      if (s.busyTxt) s.busyTxt.textContent =
+        (s.busyTarget > 0.05 ? "writing" : s.queueTarget > 0.05 ? "queued" : "idle");
+    });
+    var now = performance.now();
+    S.dots = S.dots.filter(function (d) {
+      var f = (now - d.t0) / d.dur;
+      if (f >= 1) { if (d.c.parentNode) d.c.parentNode.removeChild(d.c); return false; }
+      var pt = d.path.getPointAtLength(d.len * f);
+      d.c.setAttribute("transform", "translate(" + pt.x + "," + pt.y + ")");
+      return true;
+    });
+    for (var k in SC.links) {
+      var lk = SC.links[k];
+      lk.path.classList.toggle("hot", lk.glow > 0.05);
+      lk.glow *= Math.exp(-1.5 * dt);
+    }
+    $("clock").textContent = S.cursor === null ? "0.00" : S.cursor.toFixed(2);
+    if (S.until > 0)
+      $("bar").style.width = (clamp(S.cursor || 0, 0, S.until) / S.until * 100).toFixed(1) + "%";
+  }
+
+  function freezeAtEnd() {
+    S.playing = false;
+    setPill(S.error ? "error" : "done");
+    $("clock").textContent = S.lastT.toFixed(2);
+    $("bar").style.width = "100%";
+    if (S.donePayload && S.donePayload.report) showFinish(S.donePayload);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* SSE                                                                 */
+  /* ------------------------------------------------------------------ */
+  var es = null;
+  function connectStream() {
+    if (es) return;
+    es = new EventSource("/live/stream");
+    es.addEventListener("init", function (e) {
+      var d = JSON.parse(e.data);
+      S.until = d.until || 0; S.runId = d.run_id;
+      if (!M) { M = buildModel(d.config); renderScene(); }
+      setPill("running");
+      $("form-msg").textContent = "streaming live run " + d.run_id;
+      $("form-msg").className = "msg ok";
+      $("launch").disabled = true;
+      if (!S.playing) { S.playing = true; lastFrame = performance.now();
+        requestAnimationFrame(frame); }
+    });
+    es.addEventListener("delta", function (e) {
+      var d = JSON.parse(e.data);
+      (d.rows || []).forEach(function (r) {
+        S.queue.push(r);
+        if (r[0] > S.lastT) S.lastT = r[0];
+      });
+    });
+    es.addEventListener("done", function (e) {
+      var d = JSON.parse(e.data);
+      S.streamDone = true;
+      if (d.error) { S.error = d.error; $("form-msg").textContent = d.error;
+        $("form-msg").className = "msg"; }
+      S.donePayload = d;
+      if (es) { es.close(); es = null; }
+      $("launch").disabled = false;
+      // if playback already caught up (or nothing to play), freeze now
+      if (!S.playing || S.cursor === null || S.cursor >= S.lastT) freezeAtEnd();
+    });
+  }
+
+  function showFinish(d) {
+    var f = $("finish");
+    f.classList.remove("hidden");
+    f.innerHTML = "run <b>" + d.run_id + "</b> complete · t=" +
+      Number(d.t_max || 0).toFixed(2) + "<br><a href='" + d.report +
+      "'>open report</a> · <a href='" + d.vcd + "'>raw VCD</a>";
+  }
+
+  function setPill(cls) {
+    var p = $("pill"); p.className = "pill " + cls; p.textContent = cls;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* form + boot                                                         */
+  /* ------------------------------------------------------------------ */
+  var OVR = ["agents.count", "llm.slots", "llm.input_tokens_per_s",
+    "llm.output_tokens_per_s", "db.topology", "db.storage.backend",
+    "db.compute_nodes", "db.storage_nodes", "sim.until"];
+
+  function loadScenarios() {
+    fetch("/live/scenarios").then(function (r) { return r.json(); }).then(function (d) {
+      var sel = $("scenario");
+      sel.innerHTML = "";
+      (d.scenarios || []).forEach(function (s) {
+        var o = document.createElement("option");
+        o.value = s.path;
+        o.textContent = s.path + (s.until ? " · until " + s.until : "");
+        sel.appendChild(o);
+      });
+      if (!sel.children.length) {
+        var o2 = document.createElement("option");
+        o2.value = ""; o2.textContent = "no scenarios found";
+        sel.appendChild(o2); return;
+      }
+      var want = ["smoke.yaml", "sanity/sanity_single.yaml", "agents_smoke.yaml"];
+      for (var i = 0; i < want.length; i++) {
+        var opt = sel.querySelector('option[value="' + want[i] + '"]');
+        if (opt) { sel.value = want[i]; break; }
+      }
+    });
+  }
+
+  $("runform").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var overrides = {};
+    OVR.forEach(function (k) {
+      var v = $(k).value;
+      if (v !== "") overrides[k] = v;
+    });
+    $("launch").disabled = true;
+    $("form-msg").className = "msg";
+    $("form-msg").textContent = "launching…";
+    fetch("/live/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scenario: $("scenario").value, overrides: overrides }),
+    }).then(function (r) {
+      return r.json().then(function (j) { return { code: r.status, j: j }; });
+    }).then(function (res) {
+      if (res.code === 202) {
+        M = null;
+        S.queue = []; S.qi = 0; S.cursor = null; S.lastT = 0;
+        S.streamDone = false; S.playing = false; S.error = null;
+        S.dots = []; S.counters = { tokens_in: 0, tokens_out: 0 };
+        $("finish").classList.add("hidden");
+        if (es) { es.close(); es = null; }
+        connectStream();
+      } else {
+        $("form-msg").textContent = (res.j && res.j.detail) || ("HTTP " + res.code);
+        $("launch").disabled = false;
+      }
+    }).catch(function (err) {
+      $("form-msg").textContent = String(err);
+      $("launch").disabled = false;
+    });
+  });
+
+  $("speed").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button"); if (!b) return;
+    S.speed = +b.getAttribute("data-s");
+    [].forEach.call($("speed").children, function (c) { c.classList.remove("on"); });
+    b.classList.add("on");
+  });
+
+  loadScenarios();
+  fetch("/live/state").then(function (r) { return r.json(); }).then(function (st) {
+    if (!st || st.status === "idle") { setPill("idle"); return; }
+    if (st.error) { $("form-msg").textContent = st.error; }
+    connectStream();
+  }).catch(function () { setPill("idle"); });
+})();

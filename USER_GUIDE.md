@@ -321,10 +321,38 @@ change). Routes:
 | Route | What you get |
 |---|---|
 | `/` | d3-wave live waveform view over SSE (init snapshot → ~1 Hz deltas → done). Works on finished runs (emits `done` immediately) and on still-running ones (deltas tail the VCD, holding back a possibly-mid-write last block). |
+| `/live` | **Animated component view + parameter form** — see below. |
 | `/signals` | Signal catalog JSON — names, scopes, types parsed from the run's VCD (see §6.4). |
 | `/reports` | Auto-indexed report list (any `*.html` template shipped in `viz/templates/` — see §8.3). |
 | `/reports/<name>` | The report rendered now, from this run's `metrics.db`. |
 | `/vcd` | The raw VCD file (`run.vcd`), for feeding Surfer (deep-dive link is embedded on the page when serving publicly-reachable URLs). |
+
+#### `/live` — watch a run happen, then launch one yourself
+
+Open `http://127.0.0.1:<port>/live` for an animated topology of the platform:
+the agent pool on the left, `llm.server` (ingress **queue cylinder** +
+slot-occupancy bars + token counters) in the middle and the DB endpoint on
+the right, wired per topology — centralized stacks one compute over its
+storage node, disaggregated/distributed draw an N × M compute↔storage mesh.
+Request **dots ride the wiring** (submit → queue → process → return) and
+links glow while transfers are in flight.
+
+The view streams the live run's `metrics.db` sample rows over
+`GET /live/stream` (SSE `init → delta → done`) and plays them back on its
+own sim-clock — pick **1×…max** playback speed; the clock keeps running
+while the simulation writes rows, and the frame freezes on the final state
+when the run ends.
+
+The left panel **launches a run without leaving the browser**: pick a
+scenario (every runnable scenario under `scenarios/` is listed), optionally
+override `agents.count`, `llm.slots` / token rates, `db.topology`,
+`db.storage.backend`, compute/storage node counts and `sim.until`, then hit
+*launch*. The run executes as a subprocess into `runs/live/<run_id>/` and is
+animated live; a second concurrent launch is rejected (HTTP 409) until the
+first finishes. When it completes, the panel links to the run's rendered
+report (`/live/run/<id>/report` — the usual full pipeline lands in the run
+dir: `metrics.db`, `run.vcd`, `report.html`, `summary.json`) and its raw
+VCD. API-wise: `POST /live/run`, `GET /live/state`, `GET /live/scenarios`.
 
 ### `render` — standalone report HTML
 

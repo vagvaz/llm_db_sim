@@ -1,0 +1,88 @@
+# 23_distributed_nodes_dbbound.yaml — study 2, axis 3c: peer count (N) at
+# the DB-bound point (distributed topology).
+# Grounding: .scratch/agent-db-sim/research/{llm-inference-serving.md, tpc-workloads.md, ssd-generations.md}
+#
+# Same DB-bound instrument as 20/22 (agents 64 = llm slots 64, token caps
+# at rung f=16, ssd_enterprise, until 600, seed 701; constraint
+# 1 <= coordinators < compute_nodes pinned at C=1).
+#
+# In this simulator the peer count does NOT add entry-compute capacity
+# (queries enter through coordinators; peers contribute their slot pool as
+# the per-peer storage serialization stages). The question here is what
+# growing peers [2 -> 4] buys at a saturated coordinator: peer-leg
+# serialization / peer-storage contention relief only. The C=1/N=4 cell
+# replicates file 22's coordinators=1 run (intentional replication anchor).
+#
+#   agent-db-sim sweep scenarios/sensitivity2/23_distributed_nodes_dbbound.yaml \
+#     --out runs/sensitivity2 --jobs 8
+# -> runs/sensitivity2/s2-dist-nodes-dbbound/ 2 runs.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 64
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 64                     # = agents: no admission queue by construction
+  input_tokens_per_s: 128000    # rung f=16: 2x grounded llm_huge
+  output_tokens_per_s: 32000
+  ingress: fifo
+
+db:
+  topology: distributed
+  compute_nodes: 2              # swept: 2 | 4 (total nodes, C pinned at 1)
+  storage_nodes: 2
+  coordinators: 1
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: s2-dist-nodes-dbbound
+  max_jobs: 8
+  factors:
+    db.compute_nodes: [2, 4]

@@ -1,0 +1,145 @@
+# 10_llm_ladder.yaml — study 2, axis 1: the inference-provisioning ladder.
+#
+# Grounded base (everything from scenarios/profiles/grounded_agent_70b.yaml,
+# as in sensitivity study 1):
+#   - 70B-midpoint endpoint (llm-inference-serving.md §4): aggregate caps
+#     8000 tok/s input + 2000 tok/s output = 10k tok/s, 32 slots
+#   - grounded lognormal tokens (median-in ~60k / mean-in ~71.6k, mean-out
+#     ~2.5k per call) with the mixed_agent_retrieval_analytics mix
+#     (tpc-workloads.md) — mean 3.505 CSE and 0.575 GB of row storage per
+#     DB query
+#   - centralized DB, 4 compute slots, ssd_enterprise (ssd-generations.md §4)
+#
+# Design: provisioning LADDER over the grounded endpoint demand. Rung f
+# scales BOTH token caps by f: in = 8000*f, out = 2000*f (aggregate 10k*f
+# tok/s). f=1 IS the grounded endpoint; f=8 IS the grounded `llm_huge`
+# profile (64k/16k); we add f=16 (2x llm_huge) because the analytical
+# crossover lands near f~9 (see README "grounding"): at f=8 the DB compute
+# utilization offered by the cap-limited goodput
+#   G(f) = 10^4*f / 74.15k tok-per-call  ->  DB demand = 3.505*G slot-u/s
+#   vs 4 slots reach ~95% at f=8 (the knee) and only *saturates* past
+#   f ~ 9.2. The ladder spans underprovisioned (0.5x) to deep-over-
+#   provisioned (16x) so the DB becomes the binding component at the top.
+#
+# Fixed: llm.slots 32 (the grounded endpoint shape — slots stay constant so
+# the ONLY moving part along the ladder is the token cap; at agents>32 the
+# admission queue rides on top and is read off separately as llm queue
+# stats), db untouched, sim.until 600, seed 701 (= study-1 convention).
+#
+# Agents: [64, 128, 256, 512] — study 1 maxed at 64; 64 keeps continuity,
+# 128/256/512 push closed-loop agent counts 4x/8x/16x the endpoint slots.
+# NOTE: goodput is cap-limited: expected completions/run ~ 600 * 10^4*f/74k
+#   (0.5x ~ 40, 1x ~ 81, 2x ~ 161, 4x ~ 323, 8x ~ 646* capped by the DB
+#   knee, 16x pinned hard at the DB compute ceiling ~ 685 completions).
+#
+# Invocation — six rungs, each its own sweep dir (per-rung profiles also
+# override sweep.name to avoid run-dir collisions):
+#
+#   for rung in s05 s2 s4 s8 s16; do
+#     agent-db-sim sweep scenarios/sensitivity2/10_llm_ladder.yaml \
+#       -p "$rung" --out runs/sensitivity2 --jobs 8
+#   done
+#   agent-db-sim sweep scenarios/sensitivity2/10_llm_ladder.yaml \
+#     --out runs/sensitivity2 --jobs 8     # f=1 grounded rung
+# -> runs/sensitivity2/s2-llm-ladder{-f05,-f2,-f4,-f8,-f16}/ 4 runs each.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 64                    # swept: 64 | 128 | 256 | 512
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 32                     # grounded endpoint shape, FIXED along the ladder
+  input_tokens_per_s: 8000      # rung f: 8000*f (s05: 4000, s2: 16k, s4: 32k,
+  output_tokens_per_s: 2000     #   s8: 64k, s16: 128k)
+
+
+db:
+  topology: centralized
+  compute_nodes: 4              # no-op on centralized
+  storage_nodes: 4
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: s2-llm-ladder           # overridden per rung profile
+  max_jobs: 8
+  factors:
+    agents.count: [64, 128, 256, 512]
+
+profiles:
+  s05:                          # rung 0.5x: underprovisioned endpoint
+    sweep:
+      name: s2-llm-ladder-f05
+    llm:
+      input_tokens_per_s: 4000
+      output_tokens_per_s: 1000
+  s2:                           # rung 2x
+    sweep:
+      name: s2-llm-ladder-f2
+    llm:
+      input_tokens_per_s: 16000
+      output_tokens_per_s: 4000
+  s4:                           # rung 4x
+    sweep:
+      name: s2-llm-ladder-f4
+    llm:
+      input_tokens_per_s: 32000
+      output_tokens_per_s: 8000
+  s8:                           # rung 8x = the grounded llm_huge caps
+    sweep:
+      name: s2-llm-ladder-f8
+    llm:
+      input_tokens_per_s: 64000
+      output_tokens_per_s: 16000
+  s16:                          # rung 16x: DB-compute-binding regime (see header)
+    sweep:
+      name: s2-llm-ladder-f16
+    llm:
+      input_tokens_per_s: 128000
+      output_tokens_per_s: 32000

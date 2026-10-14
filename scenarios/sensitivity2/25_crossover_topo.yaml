@@ -1,0 +1,102 @@
+# 25_crossover_topo.yaml — study 2, axis 5: the crossing itself, topologies
+# on both sides of it.
+# Grounding: .scratch/agent-db-sim/research/{llm-inference-serving.md, tpc-workloads.md, ssd-generations.md}
+#
+# The ladder (10_llm_ladder.yaml) locates WHERE the DB takes over per agent
+# count; this file compares centralized vs capacity-matched disaggregated
+# (N=1, M=2 — same 4 compute slots as centralized; striping is storage-
+# side) just below (rung f=8, offered DB utilization ~95%: the knee) and
+# just above (rung f=16, DB pinned: entry-compute saturated on both
+# topologies) the analytical crossover at f ~ 9.2 (README "grounding").
+#
+# Instrument deltas vs files 20-24: llm.slots = agents (per-cell) so the
+# admission queue NEVER exists and the only llm-side effect is the
+# fair-share service stretch (tokens x n_in-flight / cap — check it against
+# T_llm in the analysis); agents [64, 512] bracket study-1's max and this
+# study's max. Profile s8 = the f=8 rung (grounded llm_huge caps); the
+# base rung is f=16.
+#
+#   agent-db-sim sweep scenarios/sensitivity2/25_crossover_topo.yaml \
+#     --out runs/sensitivity2 --jobs 8                       # f16 rung (4 runs)
+#   agent-db-sim sweep scenarios/sensitivity2/25_crossover_topo.yaml \
+#     -p s8 --out runs/sensitivity2 --jobs 8                 # f8 rung (4 runs)
+# -> runs/sensitivity2/s2-crossover-topo{-f8,}/ 4 runs each.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 64                     # swept: 64 | 512
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 512                    # >= agents (64 | 512): queue-free by design
+  input_tokens_per_s: 128000    # f16 base rung; profile s8 -> 64k
+  output_tokens_per_s: 32000    # f16 base rung; profile s8 -> 16k
+  ingress: fifo
+
+db:
+  topology: centralized         # swept: centralized | disaggregated
+  compute_nodes: 1              # disaggregated N: capacity-matched (4 slots)
+  storage_nodes: 2              # disaggregated M (striped storage)
+  coordinators: 1               # (informational outside distributed)
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: s2-crossover-topo       # f16 rung; profile s8 renames to -f8
+  max_jobs: 8
+  factors:
+    agents.count: [64, 512]
+    db.topology: [centralized, disaggregated]
+
+profiles:
+  s8:
+    sweep:
+      name: s2-crossover-topo-f8
+    llm:
+      input_tokens_per_s: 64000
+      output_tokens_per_s: 16000

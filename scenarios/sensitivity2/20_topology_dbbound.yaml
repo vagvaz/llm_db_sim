@@ -1,0 +1,107 @@
+# 20_topology_dbbound.yaml — study 2, axis 2: the three topologies at a
+# DB-compute-bound operating point.
+# Grounding: .scratch/agent-db-sim/research/{llm-inference-serving.md, tpc-workloads.md, ssd-generations.md}
+#
+# DB-bound instrument (used by files 20-26): the LLM is generously
+# provisioned so that inference cannot bind for ANY DB-side factor here:
+#   - agents 64 = llm.slots 64: every agent admitted instantly, NO llm
+#     ingress queue -> queue-based bottleneck attribution is not blinded by
+#     an admission waiting room (the study-1 pitfall)
+#   - token caps at rung f=16 (input 128k + output 32k = 160k tok/s
+#     aggregate = 2x the grounded llm_huge profile): cap-limited goodput
+#     would be 160k/74.1k ~ 2.16 inferences/s, but the centralized 4-slot
+#     DB can only sustain 4/3.505 ~ 1.14 inferences/s -> the DB compute
+#     station saturates (~100% slot occupancy) and the completion rate is
+#     DB-capped. The f=8 rung would only reach the knee (~95% offered
+#     utilization); f=16 pins it outright (grounding in 10_llm_ladder.yaml).
+#
+# This file: one-at-a-time topology ranking at that DB-bound point, each
+# topology at its minimal "grounded-ish" footprint:
+#   centralized  N/M no-op                 (4 compute slots, local storage)
+#   disaggregated N=2, M=2                 (8 compute slots, striped storage
+#                                           over ONE shared 100 Gb segment)
+#   distributed  total=2, coordinators=1   (1 coordinator entry node, 4 slots,
+#                                           1.2x compute overhead + per-peer
+#                                           serialization; 1 peer for storage)
+# Capacity differs by construction (that is part of the finding): the
+# centralized/distributed entry compute is DB-bound, the N=2 disaggregated
+# pool sits at the knee (~95% offered utilization).
+#
+# Fixed: grounded tokens/mix/db (scenarios/profiles/grounded_agent_70b.yaml)
+# including 4 slots/node, issue_ratio 0.2, three_phase split, ssd_enterprise,
+# network latency 0.0005 / bandwidth 25 GB/s / coordinator_overhead 1.2;
+# sim.until 600, seed 701.
+#
+#   agent-db-sim sweep scenarios/sensitivity2/20_topology_dbbound.yaml \
+#     --out runs/sensitivity2 --jobs 8
+# -> runs/sensitivity2/s2-topo-dbbound/ 3 runs.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 64
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 64                     # = agents: no admission queue by construction
+  input_tokens_per_s: 128000    # rung f=16: 2x grounded llm_huge
+  output_tokens_per_s: 32000
+  ingress: fifo
+
+db:
+  topology: centralized         # swept: centralized | disaggregated | distributed
+  compute_nodes: 2              # disaggregated N (no-op on centralized)
+  storage_nodes: 2              # disaggregated M
+  coordinators: 1               # distributed entry nodes (needs 1 <= C < N)
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: s2-topo-dbbound
+  max_jobs: 8
+  factors:
+    db.topology: [centralized, disaggregated, distributed]

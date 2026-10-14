@@ -1,0 +1,92 @@
+# 24_storage_backend_dbbound.yaml — study 2, axis 4: SSD generation at the
+# DB-compute-bound point (the regime study 1 was blind to).
+# Grounding: .scratch/agent-db-sim/research/{llm-inference-serving.md, tpc-workloads.md, ssd-generations.md}
+#
+# Same DB-bound instrument (agents 64 = llm slots 64, token caps at rung
+# f=16 = 128k in / 32k out; until 600, seed 701), centralized topology so
+# the DB compute station stays saturated.
+#
+# Study 1 (`scenarios/sensitivity/07_storage_backend.yaml`) ran this axis
+# 20% DB utilization: per-stage storage service moved exactly as the
+# presets prescribe while e2e was blind to it. Here DB compute binds
+# (offered DB demand 7.6 slot-u/s vs 4 slots), which raises realized
+# storage demand to ~0.65 GB/s of scanned row-storage per run — the
+# strictest test of whether the ssd generation ever couples into e2e or
+# stays a per-stage curiosity.
+#
+#   agent-db-sim sweep scenarios/sensitivity2/24_storage_backend_dbbound.yaml \
+#     --out runs/sensitivity2 --jobs 8
+# -> runs/sensitivity2/s2-storage-dbbound/ 3 runs.
+#
+# Presets (ssd-generations.md §5, components/db/backend.py): ssd_gen3
+# (0.294 s/GB seq, 3.4 GB/s), ssd_gen4 (0.1471, 6.8), ssd_enterprise
+# (0.0714, 14.0) — gen5 deliberately NOT swept (study-1 convention).
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 64
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 64                     # = agents: no admission queue by construction
+  input_tokens_per_s: 128000    # rung f=16: 2x grounded llm_huge
+  output_tokens_per_s: 32000
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 4              # no-op on centralized
+  storage_nodes: 4
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise     # swept: ssd_gen3 | ssd_gen4 | ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: s2-storage-dbbound
+  max_jobs: 8
+  factors:
+    db.storage.backend: [ssd_gen3, ssd_gen4, ssd_enterprise]

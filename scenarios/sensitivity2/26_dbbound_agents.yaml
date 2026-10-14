@@ -1,0 +1,91 @@
+# 26_dbbound_agents.yaml — study 2, axis 6: does the DB-bound regime hold
+# when the closed loop grows to 256/512 agents?
+# Grounding: .scratch/agent-db-sim/research/{llm-inference-serving.md, tpc-workloads.md, ssd-generations.md}
+#
+# Study 1's DB-side sweeps were all run at 16-64 agents; its extrapolation
+# ("DB compute would approach binding only at ~300+ agents AND a scaled
+# token cap") presumes the binding point is agent-count-invariant once the
+# cap is scaled beyond the DB. This file tests that directly: the
+# DB-bound instrument (token caps at rung f=16 = 128k in / 32k out =
+# 160k tok/s aggregate; llm.slots = agents so NEITHER token rates nor
+# admission ever bind the loop) at agents [64, 256, 512], centralized DB.
+#
+# Expected (and the point of the cell): goodput pins at the DB compute
+# ceiling ~1.14 inferences/s and DB compute utilization pins at ~100% in
+# ALL cells; agent count only stretches the llm fair-share service
+# (tokens x agents / aggregate cap) and the per-agent call count falls
+# (calls/agent ~ 685/agents). Any drift away from 1.14 completions/s is a
+# real closed-loop interaction worth surfacing.
+#
+#   agent-db-sim sweep scenarios/sensitivity2/26_dbbound_agents.yaml \
+#     --out runs/sensitivity2 --jobs 8
+# -> runs/sensitivity2/s2-dbbound-agents/ 3 runs.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 64                     # swept: 64 | 256 | 512
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 512                    # >= agents (64 | 256 | 512): queue-free
+  input_tokens_per_s: 128000    # rung f=16: 2x grounded llm_huge
+  output_tokens_per_s: 32000
+  ingress: fifo
+
+db:
+  topology: centralized
+  compute_nodes: 4              # no-op on centralized
+  storage_nodes: 4
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: s2-dbbound-agents
+  max_jobs: 8
+  factors:
+    agents.count: [64, 256, 512]

@@ -1,0 +1,93 @@
+# 21_disagg_scaleout_dbbound.yaml — study 2, axis 3a: disaggregated
+# scale-out relief at the DB-compute-bound operating point.
+# Grounding: .scratch/agent-db-sim/research/{llm-inference-serving.md, tpc-workloads.md, ssd-generations.md}
+#
+# Same DB-bound instrument as 20_topology_dbbound.yaml (agents 64 = llm
+# slots 64, so zero llm ingress queue; token caps at rung f=16 = 128k in +
+# 32k out = 160k tok/s aggregate = 2x grounded llm_huge; grounded tokens,
+# mixed_agent mix, ssd_enterprise, until 600, seed 701).
+#
+# Design: the (N, M) frontier at that point, base N=1 M=2:
+#   - N=1 keeps the centralized compute capacity (4 slots) while moving
+#     storage behind one shared segment -> the cleanest "wiring cost only"
+#     cell; capacity-match to centralized.
+#   - N=2 doubles compute to 8 slots: offered DB demand is 7.6 slot-u/s
+#     (cap-limited goodput 2.16/s x 3.505 CSE/call) -> N=2 sits just at the
+#     knee; N=4 clears it (16 slots) and hands binding back to the LLM cap.
+#   - M in {1, 2} stripes storage demand (realized goodput ~1.14 inferences
+#     DB-capped -> ~0.65 GB/s vs 14 GB/s per ssd_enterprise node; M is
+#     expected to be a null axis here — the point of including it).
+#
+#   agent-db-sim sweep scenarios/sensitivity2/21_disagg_scaleout_dbbound.yaml \
+#     --out runs/sensitivity2 --jobs 8
+# -> runs/sensitivity2/s2-disagg-dbbound/ 6 runs.
+
+sim:
+  until: 600.0
+  seed: 701
+
+agents:
+  count: 64
+  input_tokens:
+    distribution: lognormal
+    mean: 11.0
+    sigma: 0.6
+  output_tokens:
+    distribution: lognormal
+    mean: 7.36
+    sigma: 1.0
+  query_profiles:
+    - name: point_lookup        # TPC-C Order-Status/Stock-Level + KV fetches
+      complexity: 0.005
+      volume: 0.0001
+      weight: 0.45
+    - name: small_analytic      # TPC-H Q6/Q11/Q12/Q14/Q15/Q22
+      complexity: 1.5
+      volume: 0.5
+      weight: 0.20
+    - name: join_heavy          # TPC-H Q2-Q10/Q19/Q21
+      complexity: 12.0
+      volume: 4.0
+      weight: 0.10
+    - name: wide_scan_aggregate # TPC-H Q1/Q13/Q17/Q18/Q20
+      complexity: 20.0
+      volume: 0.75
+      weight: 0.10
+    - name: oltp_tx             # TPC-C New-Order/Payment
+      complexity: 0.02
+      volume: 0.0002
+      weight: 0.15
+
+llm:
+  slots: 64                     # = agents: no admission queue by construction
+  input_tokens_per_s: 128000    # rung f=16: 2x grounded llm_huge
+  output_tokens_per_s: 32000
+  ingress: fifo
+
+db:
+  topology: disaggregated
+  compute_nodes: 1              # swept: 1 | 2 | 4
+  storage_nodes: 2              # swept: 1 | 2
+  compute:
+    slots: 4
+    ingress: fifo
+    issue_ratio: 0.2
+    phase_split: three_phase
+  storage:
+    backend: ssd_enterprise
+  network:
+    latency: 0.0005
+    bandwidth: 25.0
+    capacity: 8.0
+    request_size: 0.01
+    coordinator_overhead: 1.2
+
+metrics:
+  warmup: 0.1
+
+sweep:
+  name: s2-disagg-dbbound
+  max_jobs: 8
+  factors:
+    db.compute_nodes: [1, 2, 4]
+    db.storage_nodes: [1, 2]

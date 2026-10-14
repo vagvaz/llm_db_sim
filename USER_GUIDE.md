@@ -340,6 +340,19 @@ mainly useful for other templates or CI artifacts. Sweep mode: add
 `--sweep <sweep-dir>` to render a sweep-comparison report over a sweep root
 (defaults to `--name sweep_compare`; see §8.5).
 
+### `analyze` — analytical cross-check of one run
+
+```bash
+uv run agent-db-sim analyze <run-dir>
+```
+
+Builds the closed-network model (MVA / exact Gordon–Newell chain, ported
+from the repo-root `core2.js` reference) from the run's config snapshot and
+prints it side by side with the run's measured means: throughput, cycle,
+per-hop latencies, waits, utilizations — with a relative-error column and
+a qualitative verdict line. Means only: percentiles have no analytical
+counterpart. Details in §9.
+
 ---
 
 ## 6. Reading results
@@ -657,7 +670,82 @@ one and reports `Δ metric = other − base` per group (the `sweep_summary.json`
 
 ---
 
-## 9. Known limitations (as of this writing)
+## 9. Analytical cross-check — `analyze` (and the `analytical_compare` block)
+
+Every run can be cross-checked against **closed-network queueing theory**
+(mean value analysis / exact Gordon–Newell chain — the very model in the
+repo-root `core2.js` reference analyzer, ported to
+`src/agent_db_sim/analysis/`): the workload is a closed loop of N agents
+whose cycle is one LLM inference then one DB query, and the analyzer
+decomposes it into M/M/c chain stations evaluated exactly.
+
+```sh
+agent-db-sim analyze runs/topology_compare
+# analytical cross-check: runs/topology_compare (N=8 agents, ...)
+#
+# side-by-side (rel err = (sim - model) / model):
+#   metric                 simulated  analytical  rel err
+#   ---------------------  ---------  ----------  -------
+#   throughput (cycles/s)  ...        ...
+#   cycle (N/X)            ...
+#   inference hop (R_llm)  ...
+#   db hop (R_db)          ...
+#   util llm slots         ...        ...
+#   ...
+# verdict: bottleneck MATCH (sim=llm / model=llm) | means tight (cycle within 5%)
+```
+
+### 9.1 What the analytical side assumes
+
+- **Means only, exponential service** — per-station service means come from
+  the run's `config.yaml` snapshot alone (configured token-distribution
+  means, QueryProfile classes, storage backend presets + overrides), never
+  from trace data. Simulated **percentiles have no analytical counterpart**
+  (p50/p95/p99 are never compared).
+- **The DB is one "slot-held-through" station**: the sim holds a DB compute
+  slot from admission through issue → net → storage → finalize, so the
+  model treats the DB as a single M/M/c station whose mean service
+  includes the middle legs, with a mean-field stretch on the storage
+  pacing work at the observed middle concurrency (shared-ceiling
+  contention, as the backend budget shares its rate in flight).
+- **The aggregate LLM token cap is a second bottleneck**: when model demand
+  exceeds the cap, throughput pins at `cap / E[tokens]` and the check
+  reports the `token-cap` regime — the exact regime where the sim's
+  queue-share attribution is blind (saturation shows on the token rate,
+  not on queues).
+- Scope notes: legacy `[inference, db]` loops are exact; workflow
+  templates are folded into per-cycle visit counts (exact only when every
+  template alternates 1:1); `two_phase` split is approximated;
+  connection-pool queueing is not modeled.
+
+### 9.2 How to read the error column
+
+`rel err = (sim − model) / model` per metric. The verdict line combines
+two qualitative calls:
+
+- **bottleneck MATCH/MISMATCH** — family-level (llm vs db) agreement
+  between the simulated attribution and the model's argmax response time.
+  In **queue-free** runs both sides degenerate to saturation proxies, so
+  the call falls back to the utilization argmax; in the **token-cap**
+  regime the comparison is the sim's token rate vs the configured cap.
+- **means band** — the cycle (N/X) relative error: `tight ≤5%`, `ok
+  ≤15%`, otherwise `off`.
+
+Treat <1–3% as "the model reproduces the measured system"; larger errors at
+occupied stations just below saturation are the classic knee
+sensitivity (wait ∝ 1/(1−ρ)), and deterministic-service sanity scenarios
+carry a documented exponential-assumption error (the exact-per-hand
+`sanity_single`/`sanity_disaggregated` runs cross-check to ~0%).
+
+The same table renders inside reports: add an
+`- {type: analytical_compare}` block to any `<name>.blocks.yaml`
+(`src/agent_db_sim/viz/templates/analytical.blocks.yaml` is the standard
+report plus this section), or use `agent-db-sim render <run-dir>
+--name analytical`.
+
+---
+
+## 10. Known limitations (as of this writing)
 
 - `sat_score` in the `bottleneck` table reads 0 (attribution is
   queue-share-only) — component/probe naming join mismatch, being fixed;
@@ -676,7 +764,7 @@ one and reports `Δ metric = other − base` per group (the `sweep_summary.json`
 
 ---
 
-## 10. Where to go next
+## 11. Where to go next
 
 - Glossary & canonical terms: `CONTEXT.md`
 - Decision journal & ticket tracker (how the system was built and why):

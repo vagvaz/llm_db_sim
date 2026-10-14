@@ -536,6 +536,65 @@ def _block_markdown(view: _View, spec: Dict[str, Any]) -> Tuple[str, str]:
     return "Notes", _markdown_html(str(spec.get("text", "")))
 
 
+def _block_analytical_compare(
+    view: _View, spec: Dict[str, Any]
+) -> Tuple[str, str]:
+    """Run-level block: simulated vs analytical closed-chain comparison.
+
+    Builds the config-only analytical model (means-only exponential closed
+    chain, see ``agent_db_sim.analysis``) from the run's ``config.yaml``
+    snapshot and joins it against the run's measured means from its
+    ``metrics.db``, one row per shared metric with a relative-error column,
+    plus the qualitative bottleneck verdict and regime notes.
+    """
+    from agent_db_sim.analysis.compare import analyze_run
+
+    run_dir = view.run_dir
+    if run_dir is None:  # pragma: no cover - guarded by the _RUN registry
+        raise ValueError("analytical_compare needs a run directory")
+    try:
+        report = analyze_run(run_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"analytical_compare: this run cannot be cross-checked "
+            f"({exc}); the block needs a full-model run with an "
+            f"agents/llm/db scenario config"
+        ) from exc
+
+    head = ["metric", "simulated", "analytical", "rel err"]
+    rows = [r.as_cells() for r in report.rows]
+    body = _table_html(head, rows)
+
+    st_head = ["station", "tau", "c", "scv", "L", "Lq", "R", "rho",
+               "sim util", "sim wait"]
+    st_rows = [
+        [s.name, _fmt(s.tau), str(s.c), _fmt(s.scv), _fmt(s.L), _fmt(s.Lq),
+         _fmt(s.R), _fmt(s.rho), _fmt(s.sim_util), _fmt(s.sim_queue_mean)]
+        for s in report.stations
+    ]
+    body += _table_html(st_head, st_rows)
+
+    lines: List[str] = []
+    if report.sim_bottleneck is not None:
+        comp, stage, score = report.sim_bottleneck
+        lines.append(
+            f"simulated attribution winner: <code>{comp}.{stage}</code> "
+            f"(score {_fmt(score)}) — {report.verdict_bottleneck}"
+        )
+    lines.append(_markdown_html(report.verdict))
+    regime = "token-cap" if report.regime == "token-cap" else "floor"
+    lines.append(f"regime: <b>{regime}</b> · N={report.n_agents} · "
+                 f"topology={report.topology}")
+    for note in report.notes:
+        lines.append(f"<p><em>note:</em> {note}</p>")
+    body += "\n".join(
+        f'<p class="analyze-note">{line}</p>' if line.startswith("regime:")
+        else line
+        for line in lines
+    )
+    return "Analytical cross-check (closed-chain model)", body
+
+
 # --------------------------------------------------------------------- #
 # sweep-level blocks                                                     #
 # --------------------------------------------------------------------- #
@@ -723,6 +782,7 @@ _RENDERERS: Dict[str, Tuple[Callable[[_View, Dict[str, Any]], Tuple[str, str]], 
     "plot_percentiles": (_block_plot_percentiles, _RUN),
     "plot_bottleneck": (_block_plot_bottleneck, _RUN),
     "plot_distribution": (_block_plot_distribution, _RUN),
+    "analytical_compare": (_block_analytical_compare, _RUN),
     "markdown": (_block_markdown, _ANY),
     # sweep-level blocks
     "run_table": (_block_run_table, _SWEEP),

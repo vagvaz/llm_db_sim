@@ -1,0 +1,36 @@
+# 'analytical' report: the standard sections plus the analytical
+# cross-check block (simulated vs closed-chain model side by side).
+# A report is an ordered list of named blocks; edit this file to add,
+# remove, or reorder sections — no code. Scaffold: blocks.html.
+blocks:
+  - type: metadata
+    title: Run metadata
+
+  - type: plot_percentiles
+    title: "Latency percentiles (per stage)"
+    div: fig-latency-percentiles
+
+  - type: metric_table
+    table: latency_percentiles
+    inline: true          # table under the previous figure's section
+
+  - type: plot_series
+    series: utilization
+    title: "Utilization (slots / token rate)"
+    div: fig-utilization
+
+  - type: plot_series
+    series: tokens
+    div: fig-token-rate
+    inline: true
+
+  - type: metric_table
+    table: utilization_stats
+    inline: true
+
+  - type: plot_bottleneck
+    title: "Bottleneck attribution (hybrid: queue share 70% + saturation 30%)"
+    div: fig-bottleneck
+
+  - type: analytical_compare
+    title: "Analytical cross-check (simulated vs closed-chain model)"

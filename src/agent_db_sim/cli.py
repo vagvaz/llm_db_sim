@@ -4,6 +4,7 @@ Usage: ``agent-db-sim run scenarios/topology_compare.yaml [--out runs]``
        ``agent-db-sim sweep scenarios/topology_compare.yaml [--out runs]``
        ``agent-db-sim serve <run-dir> [--port]``   (viz server)
        ``agent-db-sim render <run-dir> [--name]``  (standalone report HTML)
+       ``agent-db-sim analyze <run-dir>``          (analytical cross-check)
 """
 
 from __future__ import annotations
@@ -101,6 +102,34 @@ def run(
         f"  bottleneck: {winner.get('component', '<none>')}.{winner.get('stage', '*')} "
         f"(score={winner.get('score', 0):.3f}, queue_share={winner.get('queue_share', 0):.3f})"
     )
+
+
+@app.command()
+def analyze(
+    run_dir: Path = typer.Argument(
+        ..., exists=True, file_okay=False, readable=True,
+        help="Completed run directory (with config.yaml + metrics.db).",
+    ),
+) -> None:
+    """Analytical cross-check: simulate vs closed-network queueing theory.
+
+    Builds the exact closed-chain model (ported from the repo-root core2.js
+    oracle) from the run's config snapshot only — per-station mean service
+    from the configured token/QueryProfile means and backend presets — and
+    prints it side-by-side with the run's measured means (from metrics.db):
+    e2e and per-stage latencies, utilization, throughput and the bottleneck
+    attribution. Relative errors plus a qualitative verdict line; the
+    analytical model is exponential-service means-only, so percentiles have
+    no analytical counterpart.
+    """
+    from agent_db_sim.analysis import analyze_run, format_text
+
+    try:
+        report = analyze_run(run_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(format_text(report))
 
 
 def _next_run_dir(out_root: Path, stem: str) -> Path:

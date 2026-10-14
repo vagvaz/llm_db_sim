@@ -37,8 +37,8 @@
   .tab{flex:1;text-align:center;padding:8px 4px;font-size:13px;border:1px solid var(--border);
     border-radius:8px;cursor:pointer;color:var(--muted);background:var(--panel2)}
   .tab.on{border-color:var(--accent);color:var(--accent2);background:rgba(90,169,230,.09)}
-  .hint{font-size:11.5px;color:var(--muted)}
-  .hintline{font-size:11.5px;color:var(--muted);margin:-3px 0 10px;max-width:60ch}
+  .hint{font-size:12px;color:var(--muted)}
+  .hintline{font-size:12px;color:var(--muted);margin:-3px 0 10px;max-width:60ch}
   .banner{display:none;border-radius:8px;padding:9px 14px;font-size:13px;margin-bottom:12px;border:1px solid}
   .banner.show{display:block}
   .banner.warn{border-color:var(--warn);color:var(--warn);background:rgba(229,180,90,.08)}
@@ -49,10 +49,10 @@
   .tile .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:3px}
   .tile .v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--accent2)}
   .tile.mcmode .v{color:var(--mcc)}
-  .tile .a{display:block;font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px;min-height:13px}
+  .tile .a{display:block;font-size:10.5px;color:var(--muted);font-family:var(--mono);margin-top:3px;min-height:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .chartcard{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:13px 14px;margin-bottom:14px}
   .chartcard h3{font-size:13px;font-weight:600;margin:0 0 2px}
-  .chartcard .note{font-size:12px;color:var(--muted);margin:0 0 8px}
+  .chartcard .note{font-size:12.5px;color:var(--muted);margin:0 0 8px}
   .chartcard .read{font-size:12.5px;color:var(--text);margin:8px 0 0;padding-top:8px;border-top:1px dashed var(--border)}
   .chartcard .read b{color:var(--accent2)}
   svg{display:block;width:100%;height:auto}
@@ -61,7 +61,7 @@
   td{padding:5px 9px;text-align:right;font-family:var(--mono);border-bottom:1px solid var(--grid)}
   td:first-child,th:first-child{text-align:left;font-family:inherit}
   tr:last-child td{border-bottom:none}
-  .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:6px;flex-wrap:wrap}
+  .legend{display:flex;gap:14px;font-size:12.5px;color:var(--muted);margin-top:6px;flex-wrap:wrap}
   .legend .sw{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
   details.assumptions{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 16px;font-size:12.5px;color:var(--muted)}
   details.assumptions summary{cursor:pointer;color:var(--text);font-size:13px;font-weight:600}
@@ -79,11 +79,11 @@
 <body>
 <header>
   <h1>Agent–DB Workload Analyzer</h1>
-  <p>Closed-loop statistical model of N agents cycling <em>think → LLM call → DB query</em>.
-     Analytic engine: exact Gordon–Newell/Buzen closed-chain means (exact at SCV=1, cross-checked vs. CTMC)
-     plus calibrated latency percentiles. Monte Carlo engine: exact FCFS discrete-event simulation.
-     See the assumptions panel for model math & references; the repo's DES simulator is documented
-     separately in the root README.</p>
+  <p>What happens when N agents keep cycling <em>think → call → query → repeat</em>? This page answers with
+     two engines: a fast <b>analytic</b> calculation (exact averages; approximate percentiles, ±10–15%) and a
+     <b>Monte Carlo</b> event simulation (empirical percentiles). New to the topic? Start with the
+     <a href="math_primer.html" style="color:var(--accent2)">math primer</a> — it explains every term, symbol
+     and formula on this page, with references.</p>
 </header>
 
 <main>
@@ -91,34 +91,11 @@
   <section>
     <div class="card">
       <h2>How to read this page</h2>
-      <svg class="flow" viewBox="0 0 560 150">
-        <defs>
-          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
-          </marker>
-        </defs>
-        <rect x="14" y="52" width="92" height="44" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>
-        <text x="60" y="70" text-anchor="middle" fill="var(--text)" font-size="12">N agents</text>
-        <text x="60" y="86" text-anchor="middle" fill="var(--muted)" font-size="10">the loop closed</text>
-        <line x1="110" y1="62" x2="176" y2="62" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#arr)"/>
-        <text x="142" y="52" text-anchor="middle" fill="var(--warn)" font-size="10.5">think τ<tspan baseline-shift="sub" font-size="8">think</tspan></text>
-        <rect x="180" y="30" width="128" height="60" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>
-        <text x="244" y="50" text-anchor="middle" fill="var(--text)" font-size="12">LLM endpoint</text>
-        <text x="244" y="66" text-anchor="middle" fill="var(--muted)" font-size="10">τ<tspan baseline-shift="sub" font-size="8">LLM</tspan> per call · c<tspan baseline-shift="sub" font-size="8">LLM</tspan> servers</text>
-        <text x="244" y="80" text-anchor="middle" fill="var(--muted)" font-size="10">SCV c²<tspan baseline-shift="sub" font-size="8">s,LLM</tspan></text>
-        <line x1="312" y1="60" x2="378" y2="60" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#arr)"/>
-        <text x="344" y="50" text-anchor="middle" fill="var(--muted)" font-size="10">call</text>
-        <rect x="382" y="30" width="120" height="60" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>
-        <text x="442" y="50" text-anchor="middle" fill="var(--text)" font-size="12">DB endpoint</text>
-        <text x="442" y="66" text-anchor="middle" fill="var(--muted)" font-size="10">τ<tspan baseline-shift="sub" font-size="8">DB</tspan> per query · c<tspan baseline-shift="sub" font-size="8">DB</tspan> servers</text>
-        <text x="442" y="80" text-anchor="middle" fill="var(--muted)" font-size="10">SCV c²<tspan baseline-shift="sub" font-size="8">s,DB</tspan></text>
-        <path d="M 442 92 C 442 130 60 130 60 98" fill="none" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#arr)"/>
-        <text x="250" y="126" text-anchor="middle" fill="var(--muted)" font-size="10">response goes back; agent thinks, repeats</text>
-      </svg>
+      <div id="flowBox"></div>
       <ol class="steps">
-        <li>Every <b>parameter on the left plugs into exactly one box</b> of the loop above (think time on the arrow, τ/c/SCV inside its endpoint).</li>
-        <li>The engines compute what steady state looks like: <b>tiles</b> = the headline numbers, <b>charts</b> = the distributions, <b>table</b> = per-endpoint detail.</li>
-        <li>Use <b>Monte Carlo / Compare</b> to check the analytic estimates with a discrete-event simulation.</li>
+        <li>The diagram above <b>draws itself from your station list</b> — every row in the <i>Topology</i> card is one box that every agent visits, in order, on every cycle.</li>
+        <li>Reading order: <b>tiles</b> (headline numbers) → <b>charts</b> (distributions) → <b>table</b> (per-station detail). Every chart has a <i>How to read</i> note underneath.</li>
+        <li>Use the <b>Monte Carlo</b> tab to replace the analytic estimates with simulated ones, and <b>Compare</b> to see both at once.</li>
       </ol>
     </div>
 
@@ -138,7 +115,7 @@
         <label style="font-size:13px">N — concurrent agents</label>
         <input type="number" id="N" value="8" min="1" max="2000" step="1">
       </div>
-      <div class="hintline">How many agents run the loop at the same time. More agents = more load on both endpoints; this is the main "demand" dial against the fixed server capacities.</div>
+      <div class="hintline">How many agents run the loop at the same time. More agents = more load on every endpoint; this is the main "demand" dial against the fixed server capacities.</div>
       <input type="range" id="N_s" min="1" max="120" step="1" value="8">
       <div class="field" style="margin-top:8px">
         <label>τ<sub>think</sub> — mean think time <span class="sub">s · exponential delay per cycle</span></label>
@@ -154,10 +131,11 @@
         <button class="btn" id="preset3">LLM&nbsp;+&nbsp;DB (compute&nbsp;+&nbsp;storage)</button>
         <button class="btn" id="addSt">+&nbsp;station</button>
       </div>
-      <div id="stRows"></div>
-      <div class="hintline">Agents visit <b>every listed station once per cycle, in order</b> — each row is an M/G/c endpoint
-      (parallel servers, service jitter). Model multiple compute and storage nodes by chaining them
-      (preset&nbsp;2), or extra inference stages by adding a second LLM-class station. Rescan: the first row is entered first.</div>
+      <div style="display:grid;grid-template-columns:76px 1fr 62px 62px 62px 28px;gap:8px;font-size:10px;color:var(--muted);margin-bottom:5px;letter-spacing:.5px"><span>NODE</span><span></span><span title="mean service time">τ&nbsp;(s)</span><span title="parallel servers">c</span><span title="service variability">SCV</span><span></span></div><div id="stRows"></div>
+      <div class="hintline">Agents visit <b>every listed station once per cycle, in order</b> — each row is one endpoint with
+      parallel servers and service jitter. To model separate compute and storage nodes, use the
+      <i>LLM + DB (compute + storage)</i> preset or add rows with <i>+ station</i>. Order: agents enter the
+      stations top-to-bottom.</div>
     </div>
 
     <div class="card">
@@ -207,21 +185,21 @@
       <div class="tile" id="tile_p95"><div class="k">p95 latency</div><div class="v" id="t_p95">–</div><span class="a" id="a_p95"></span></div>
       <div class="tile" id="tile_p99"><div class="k">p99 latency</div><div class="v" id="t_p99">–</div><span class="a" id="a_p99"></span></div>
       <div class="tile" id="tile_mean"><div class="k">mean ± sd</div><div class="v" id="t_mean">–</div><span class="a" id="a_mean"></span></div>
-      <div class="tile" id="tile_x"><div class="k">throughput X</div><div class="v" id="t_x">–</div><span class="a" id="a_x"></span></div>
-      <div class="tile" id="tile_rho"><div class="k">ρ (bottleneck)</div><div class="v" id="t_rho" style="font-size:16px">–</div><span class="a" id="a_rho"></span></div>
+      <div class="tile" id="tile_x"><div class="k">throughput</div><div class="v" id="t_x">–</div><span class="a" id="a_x"></span></div>
+      <div class="tile" id="tile_rho"><div class="k">load ρ (bottleneck)</div><div class="v" id="t_rho" style="font-size:16px">–</div><span class="a" id="a_rho"></span></div>
       <div class="tile" id="tile_pwait"><div class="k">P(wait) @ bottleneck</div><div class="v" id="t_pwait" style="font-size:16px">–</div><span class="a" id="a_pwait"></span></div>
     </div>
 
     <div class="chartcard">
-      <details class="assumptions" style="background:var(--panel2);border:none;padding:10px 12px">
+      <details class="assumptions" open style="background:var(--panel2);border:none;padding:10px 12px">
         <summary>What the tiles mean</summary>
         <table class="maptable">
           <thead><tr><th>tile</th><th style="text-align:left">plain meaning</th></tr></thead>
           <tbody>
             <tr><td>p50 / p90 / p95 / p99</td><td style="text-align:left">Percentiles of the <b>whole loop time</b> (think + call + query + all waiting): p95 = 95% of cycles finish within this time. The gap between p50 and p99 tells you how spiky the agent experience is.</td></tr>
             <tr><td>mean ± sd</td><td style="text-align:left">Average loop time and its natural spread.</td></tr>
-            <tr><td>throughput X</td><td style="text-align:left">Completed loops per second across the whole system. Also = the <b>arrival rate into every endpoint</b> (each loop hits each box exactly once — that's why one X feeds all stations).</td></tr>
-            <tr><td>ρ LLM / DB</td><td style="text-align:left">Per-server load at each endpoint = fraction of time a typical server is busy. ρ→1 means saturation: each extra agent adds queues faster than work finishes.</td></tr>
+            <tr><td>throughput</td><td style="text-align:left">Completed loops per second across the whole system. Also = the <b>arrival rate into every endpoint</b> (each loop hits each box exactly once — that's why one X feeds all stations).</td></tr>
+            <tr><td>load ρ</td><td style="text-align:left">Per-server load at each endpoint = fraction of time a typical server is busy. ρ→1 means saturation: each extra agent adds queues faster than work finishes.</td></tr>
             <tr><td>P(wait) LLM/DB</td><td style="text-align:left">Chance that a freshly arriving call/query finds <b>all servers busy</b> and must queue. High P(wait) with moderate ρ usually means too little capacity headroom or too much service jitter.</td></tr>
           </tbody>
         </table>
@@ -248,15 +226,14 @@
       <h3 id="arrTitle">Arrival occupancy at the DB</h3>
       <p class="note" id="arrNote">Exactly how many agents were already there when an agent arrives to add its query (arrival theorem, N−1 chain).</p>
       <div id="chartArr"></div>
-      <div class="read"><b>How to read:</b> each bar is the exact probability that an arriving query joins <b>n</b> other
+      <div class="read"><b>How to read:</b> each bar is the exact probability that an arriving agent joins <b>n</b> other
       agents already at this endpoint — the DES traces would measure the same empirical histogram.
-      Mass sitting at 0 = arriving to an empty endpoint (no queue to join); the tail beyond the server
-      count is the fraction of arrivals that must wait. Heading over the bars shows the mean seen.</div>
+      Mass sitting at 0 = arriving to an empty endpoint (no queue to join); the tail beyond the server count is the fraction of arrivals that must wait. Bar height = probability; the label under the bars shows P(0 agents already there), and the note above the chart shows the mean.</div>
     </div>
 
     <div class="chartcard">
       <h3>Saturation sweep — mean cycle latency vs. agent count</h3>
-      <p class="note">Analytic engine · knee (steepest slope) and near-saturated points marked.</p>
+      <p class="note" id="sweepNote">Analytic engine · knee = agent count where latency grows fastest; the shaded red band marks the saturated region.</p>
       <div id="chartSweep"></div>
       <div class="read"><b>How to read:</b> each point answers “what happens to everyone's loop time if we run
         this many agents”. Flat start = spare capacity; the <b>warn-dot knee</b> = the agent count where latency
@@ -272,16 +249,19 @@
 
     <div class="chartcard">
       <h3>Per-station breakdown</h3>
+      <p class="note" id="tblNote">Analytic engine · last column added by Monte Carlo when it is fresh.</p>
       <div id="tblWrap"><table><thead id="tblh"></thead><tbody id="tblb"></tbody></table></div>
-      <details class="assumptions" style="background:var(--panel2);border:none;padding:10px 12px;margin-top:8px">
+      <details class="assumptions" open style="background:var(--panel2);border:none;padding:10px 12px;margin-top:8px">
         <summary>Column meanings</summary>
         <ul>
-          <li><b>λ = X</b> — arrival (= completion) rate at that endpoint, loops/s; identical for every endpoint by flow balance.</li>
-          <li><b>ρ/server</b> — per-server busy fraction; the <b>bottleneck is the row closest to 1.</b></li>
-          <li><b>P(wait&gt;0)</b> — how often arrivals find the endpoint busy.</li>
-          <li><b>W<sub>q</sub></b> — average pure <i>waiting</i> time in that queue (this is the amount you can shave by adding servers).</li>
-          <li><b>R = τ+W<sub>q</sub></b> — total time one call/query spends inside the endpoint (wait + service).</li>
-          <li><b>L<sub>q</sub></b> — average number of agents standing in that queue right now.</li>
+          <li><b>throughput</b> (loops/s) — how many loops each station completes per second; identical for every station by flow balance.</li>
+          <li><b>ρ/server</b> — busy fraction of a typical server at that station; the <b>bottleneck is the row closest to 1.</b></li>
+          <li><b>P(wait&gt;0)</b> — how often arrivals find the station busy and must queue.</li>
+          <li><b>queue wait Wq (s)</b> — average pure <i>waiting</i> time there (the part you can shrink by adding servers).</li>
+          <li><b>delay share</b> — % of a whole cycle this station's queueing eats; the same number the banner quotes.</li>
+          <li><b>R = τ+Wq (s)</b> — total time one visit spends inside the station.</li>
+          <li><b>sojourn p50/p95/p99 (s)</b> — percentiles of the time one visit takes there (this is the agent-facing latency of that station).</li>
+          <li><b>MC queue wait (s)</b> — the same wait measured by the simulation (Monte&nbsp;Carlo tab / Compare).</li>
         </ul>
         <div class="hint">Bottleneck rule of thumb: the row with max ρ gates the whole loop — adding capacity anywhere else helps much less.</div>
       </details>
@@ -709,8 +689,12 @@ function readParams(){
 function banner(cls,text){
   const b=$('banner');
   if(!cls){ b.className='banner'; b.textContent=''; return; }
+  /* mode-aware framing: on MC/Compare tabs the solve is a reference, not the active engine */
+  let t=text;
+  if(MODE!=='A' && /^Exact closed-loop/.test(text)) t='Analytic reference: '+text.replace(/^Exact closed-loop[^·]*· /,'');
+  if(MODE!=='A' && MC && mcStale()) t+=' · MC is stale from before your last edit — press Recompute.';
   b.className='banner show '+cls;
-  b.textContent=text;
+  b.textContent=t;
 }
 
 /* ---------------- analytic ---------------- */
@@ -728,11 +712,11 @@ function computeAnalytic(){
   A.bn=bn;
   const share=bn? bn.Wq/sol.T : 0;
   if(bn.rho>=0.995){
-    banner('bad','Near saturation: bottleneck '+bn.name+' ρ='+bn.rho.toFixed(3)+' — latencies grow steeply with N.');
+    banner('bad','Near saturation: bottleneck '+bn.name+' with load ρ='+bn.rho.toFixed(3)+' — latencies grow steeply with N.');
   } else if(bn.rho>=0.9){
-    banner('warn','Bottleneck: '+bn.name+' (ρ='+bn.rho.toFixed(3)+', '+(share*100).toFixed(1)+'% of cycle time is queueing there). Approaching saturation — knee nearby.');
+    banner('warn','Bottleneck: '+bn.name+' (load ρ='+bn.rho.toFixed(3)+', delay share '+(share*100).toFixed(1)+'% of the cycle). Approaching saturation — knee nearby.');
   } else {
-    banner('ok','Exact closed-chain solve · bottleneck: '+bn.name+' (ρ='+bn.rho.toFixed(2)+', queueing = '+(share*100).toFixed(1)+'% of the loop).');
+    banner('ok','Exact closed-loop solve · bottleneck: '+bn.name+' (load ρ='+bn.rho.toFixed(2)+', delay share '+(share*100).toFixed(1)+'% of the cycle).');
   }
   setTiles(); drawLat(); drawTable(); drawSweep(); drawArr();
 }
@@ -762,15 +746,16 @@ function runMC(){
       MC=null; banner('bad','Monte Carlo failed — reduce cycles or check parameters.');
     }
     btn.textContent='Recompute (incl. Monte Carlo)'; btn.disabled=false;
-    setTiles(); drawLat(); drawTable(); drawArr();
+    computeAnalytic();   /* full refresh incl. banner (clears stale suffix, applies MC framing) */
   },20);
 }
 function fill(a){ return a.map(v=>isFinite(v)?v:0); }
 
 /* ---------------- tiles ---------------- */
+function mcFresh(){ return (MODE!=='A') && MC && !mcStale(); }
 function setTiles(){
   const S=A&&A.sol, D=A&&A.dist;
-  const mcOn=(MODE!=='A')&&MC;
+  const mcOn=mcFresh();
   const R=mcOn?MC.res:null, ST=mcOn?MC.stats:null;
   const bn=A&&A.bn;
   function put(id,v,a){
@@ -778,18 +763,31 @@ function setTiles(){
     $(id).textContent=o.v;
     const e=$('a_'+id.slice(2)); if(e) e.textContent=o.a||'';
   }
-  document.querySelectorAll('.tile').forEach(t=>t.classList.toggle('mcmode',MODE==='M'));
+  document.querySelectorAll('.tile').forEach(t=>t.classList.toggle('mcmode',MODE==='M'&&mcFresh()));
   if(!S){
     ['t_p50','t_p90','t_p95','t_p99','t_mean','t_x','t_rho','t_pwait'].forEach(id=>put(id,{v:'—'}));
     return;
   }
   const bnTxt=(r,n)=> f3(r)+' ('+n+')';
-  if(MODE==='M'){
-    if(!MC){
-      put('t_p50',{v:'—',a:'press Recompute to run MC'});
-      ['t_p90','t_p95','t_p99','t_mean','t_x','t_rho','t_pwait'].forEach(id=>put(id,{v:'—'}));
+  if(MODE==='M' && !mcFresh()){
+    if(MC){ /* stale — analytic values shown with a stale hint */
+      put('t_p50',{v:D?f2(D.p50)+' s':'—',a:'MC stale — press Recompute'});
+      put('t_p90',{v:D?f2(D.p90)+' s':'—',a:''});
+      put('t_p95',{v:D?f2(D.p95)+' s':'—',a:''});
+      put('t_p99',{v:D?f2(D.p99)+' s':'—',a:''});
+      put('t_mean',{v:D?f2(D.mean)+'±'+f2(D.sd):'—',a:''});
+      put('t_x',{v:f3(S.X)+' /s',a:''});
+      put('t_rho',{v:bn?bnTxt(bn.rho,bn.name):'—',a:''});
+      put('t_pwait',{v:bn?(bn.mix.pi*100).toFixed(0)+'%':'—',a:''});
+      $('latNote').textContent='Showing analytic values — your Monte Carlo run is from before the last parameter change. Press Recompute to refresh it.';
       return;
     }
+    put('t_p50',{v:'—',a:'press Recompute to run MC'});
+    ['t_p90','t_p95','t_p99','t_mean','t_x','t_rho','t_pwait'].forEach(id=>put(id,{v:'—'}));
+    $('latNote').textContent='No Monte Carlo run yet for these parameters — press Recompute.';
+    return;
+  }
+  if(MODE==='M'){
     const bi=bn?S.st.indexOf(bn):0;
     put('t_p50',{v:f2(ST.p50)+' s', a:'analytic '+(D?f2(D.p50)+' s':'—')});
     put('t_p90',{v:f2(ST.p90)+' s', a:'analytic '+(D?f2(D.p90)+' s':'—')});
@@ -799,7 +797,7 @@ function setTiles(){
     put('t_x',{v:f3(R.X)+' /s', a:'analytic '+f3(S.X)+' /s'});
     put('t_rho',{v:bnTxt(R.rho[bi], S.st[bi].name), a:'analytic '+(bn?bnTxt(bn.rho,bn.name):'—')});
     put('t_pwait',{v:(MC.pw[bi]*100).toFixed(0)+'%', a:'analytic '+(bn?(bn.mix.pi*100).toFixed(0)+'%':'—')});
-    $('latNote').textContent='Monte Carlo (seed '+MC.seedUsed+', n='+MC.res.kept+' kept cycles): empirical PDF/CDF; error O(1/√n).';
+    $('latNote').textContent='Monte Carlo (seed '+MC.seedUsed+', n='+MC.res.kept+' kept cycles): empirical PDF/CDF; error O(1/√'+MC.res.kept+') — switch seed/size in Numerics.';
   } else {
     put('t_p50',{v:f2(D.p50)+' s', a:mcOn?'MC '+f2(ST.p50)+' s':''});
     put('t_p90',{v:f2(D.p90)+' s', a:mcOn?'MC '+f2(ST.p90)+' s':''});
@@ -812,7 +810,15 @@ function setTiles(){
       put('t_rho',{v:bnTxt(bn.rho,bn.name), a:mcOn?('MC '+f3(R.rho[bi])):''});
       put('t_pwait',{v:(bn.mix.pi*100).toFixed(0)+'%', a:mcOn?('MC '+(MC.pw[bi]*100).toFixed(0)+'%'):''});
     }
-    $('latNote').textContent='Analytic engine: closed-chain exact means + calibrated wait mixture (±10–15% vs MC).';
+    if(MODE==='C'&&mcFresh()){
+      const dP99=D&&isFinite(D.p99)?((ST.p99-D.p99)/D.p99*100):0;
+      const dW=bn?(MC.pw[S.st.indexOf(bn)]-bn.mix.pi)*100:0;
+      $('latNote').textContent='Analytic vs Monte Carlo (seed '+MC.seedUsed+', n='+MC.res.kept+') · blue = analytic, green = simulated. Biggest gaps: p99 '+
+        (dP99>=0?'+':'')+dP99.toFixed(1)+'% (MC vs analytic), P(wait) at bottleneck '+
+        (dW>=0?'+':'')+dW.toFixed(0)+'pp — wait probability is the least accurate analytic quantity.';
+    } else {
+      $('latNote').textContent='Closed-loop solve: exact averages; percentiles approximate (±10–15% vs Monte Carlo).';
+    }
   }
 }
 
@@ -831,12 +837,11 @@ const px=(c,t,tMax)=>c.x0+(t/tMax)*(c.x1-c.x0);
 const py=(c,v)=>c.y1-v*(c.y1-c.y0);
 
 function markPercentiles(c,tMax,ps){
-  const cols={p50:'var(--warn)',p90:'var(--warn)',p95:'var(--warn)',p99:'var(--bad)'};
   ps.forEach(p=>{
     if(!isFinite(p.t)||p.t<=0||p.t>tMax) return;
     const X=px(c,p.t,tMax);
-    c.line(X,py(c,0),X,py(c,1),cols[p.lab]||'var(--warn)',1,'3 4');
-    c.text(p.lab,X+3,c.y0+12,cols[p.lab]||'var(--warn)',10,'start');
+    c.line(X,py(c,0),X,py(c,1),'var(--warn)',1,'3 4');
+    c.text(p.lab,X+3,c.y1-6,'var(--warn)',10,'start');
   });
 }
 
@@ -844,7 +849,7 @@ function drawLat(){
   const box=$('chartLat'); box.innerHTML='';
   if(!A||!A.sol) return;
   const S=A.sol, D=A.dist;
-  const useMC=(MODE!=='A')&&MC;
+  const useMC=mcFresh();
   const mcP99=useMC?MC.stats.p99:0;
   const tMax=Math.max(1e-3, Math.min(D.horizon, Math.max(mcP99*1.08, isFinite(D.p99)?D.p99*1.12:0, D.mean*3)));
   const c=svgBox(880,320);
@@ -861,7 +866,9 @@ function drawLat(){
       dC+=(first?'M':' L')+X+','+py(c,D.cdf[i]/D.M).toFixed(1); first=false;
       dP+=(dpFirst?'M':' L')+X+','+py(c,(D.f[i]/fmax)*0.55).toFixed(1); dpFirst=false;
     }
-    c.path(dP+' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,0)+' L'+px(c,0,tMax).toFixed(1)+','+py(c,0)+' Z','none',0,null,'rgba(90,169,230,.25)');
+    c.path(dP+' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,0)+' L'+px(c,0,tMax).toFixed(1)+','+py(c,0)+' Z',
+      MODE==='C'?'var(--accent)':null, MODE==='C'?1.2:0, null, MODE==='C'?null:'rgba(90,169,230,.25)');
+    if(MODE!=='C') c.path(dP,'var(--accent)',1.2,'2 3');
     c.path(dC,'var(--accent)',2);
     markPercentiles(c,tMax,[{t:D.p50,lab:'p50'},{t:D.p90,lab:'p90'},{t:D.p95,lab:'p95'},{t:D.p99,lab:'p99'}]);
   }
@@ -876,7 +883,9 @@ function drawLat(){
       dH+=(first?'M':' L')+px(c,b*w,tMax).toFixed(1)+','+y.toFixed(1)+' L'+px(c,(b+1)*w,tMax).toFixed(1)+','+y.toFixed(1);
       first=false;
     }
-    c.path(dH+' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,0)+' L'+px(c,0,tMax).toFixed(1)+','+py(c,0)+' Z','none',0,null,'rgba(76,195,138,.22)');
+    c.path(dH+' L'+px(c,tMax,tMax).toFixed(1)+','+py(c,0)+' L'+px(c,0,tMax).toFixed(1)+','+py(c,0)+' Z',
+      MODE==='C'?'var(--mcc)':null, MODE==='C'?1.2:0, null, MODE==='C'?null:'rgba(76,195,138,.22)');
+    if(MODE!=='C') c.path(dH,'var(--mcc)',1.2,'2 3');
     let dE='',first2=true;
     for(let i=0;i<n;i+=Math.max(1,Math.floor(n/400))){
       const t=Math.min(sorted[i],tMax);
@@ -913,9 +922,9 @@ function drawArr(){
     c.path('M'+x.toFixed(1)+','+py(c,0).toFixed(1)+' L'+x.toFixed(1)+','+py(c,h).toFixed(1)+' L'+(x+bw*0.8).toFixed(1)+','+py(c,h).toFixed(1)+' L'+(x+bw*0.8).toFixed(1)+','+py(c,0).toFixed(1)+' Z','none',0,null, n>=st[idxLast].c ? 'rgba(229,180,90,.55)':'rgba(90,169,230,.55)');
     if(nShow<=10 || n%2===0) c.text(''+n, x+bw*0.4, c.H-12, 'var(--muted)');
   }
-  c.text('agents already present', c.x1-4, c.H-2, 'var(--muted)', 10, 'end');
-  c.text('P →', c.x0-8, c.y0+12, 'var(--muted)', 10, 'end');
-  c.text((pmax*100).toFixed(0)+'%', c.x0-8, c.y0+24, 'var(--muted)', 10, 'end');
+  c.text('agents already present', c.x1-4, c.H-12, 'var(--muted)', 10, 'end');
+  c.text('bar height = probability', c.x0-4, c.y0+14, 'var(--muted)', 10.5, 'start');
+  c.text('P(0 agents already there) = '+(pmf[0]*100).toFixed(0)+'%', c.x0-4, c.y0+28, 'var(--accent2)', 10.5, 'start');
   box.innerHTML=c.out();
 }
 
@@ -935,39 +944,109 @@ function drawSweep(){
     const sl=pts[i+1].T-pts[i].T;
     if(sl>best+1e-9){ best=sl; knee=pts[i]; }
   }
-  const Tmax=Math.max.apply(null,pts.map(p=>p.T))*1.06;
+  const Tmax=Math.max.apply(null,pts.map(p=>p.T))*1.08;
   const Nmax=Math.max.apply(null,pts.map(p=>p.N));
   const c=svgBox(880,300);
-  for(let i=0;i<=4;i++) c.line(c.x0,c.y0+i*(c.y1-c.y0)/4,c.x1,c.y0+i*(c.y1-c.y0)/4,'var(--grid)',1);
-  [0,0.5,1].forEach(v=>c.text((Tmax*v).toFixed(1)+'s',c.x0-4,py(c,v*Tmax)+4,'var(--muted)',10.5,'end'));
-  let d='';
-  pts.forEach((p,i)=>{ d+=(i?' L':'M')+px(c,p.N,Nmax).toFixed(1)+','+py(c,p.T,Tmax).toFixed(1); });
-  c.path(d,'var(--accent)',2);
-  pts.filter(p=>p.sat).forEach(p=>c.line(px(c,p.N,Nmax),py(c,0),px(c,p.N,Nmax),py(c,1),'var(--bad)',2));
-  if(knee){
-    c.circle(px(c,knee.N,Nmax),py(c,knee.T,Tmax),4.5,'var(--warn)');
-    c.text('knee N='+knee.N,px(c,knee.N,Nmax),py(c,knee.T,Tmax)-10,'var(--warn)',10);
+  const nx=p=>c.x0+((p-1)/(Nmax-1))*(c.x1-c.x0);
+  const ny=p=>c.y1-(p/Tmax)*(c.y1-c.y0);
+  /* y grid + labels */
+  for(let i=0;i<=4;i++){
+    const yv=Tmax*i/4;
+    c.line(c.x0,ny(yv),c.x1,ny(yv),'var(--grid)',1);
+    c.text(yv.toFixed(1)+'s',c.x0-4,ny(yv)+4,'var(--muted)',10.5,'end');
   }
-  for(let i=0;i<=4;i++){ const nv=Math.round(Nmax*i/4); c.text(''+nv,px(c,nv,Nmax),c.H-12,'var(--muted)'); }
+  /* saturated band (instead of a red wall) */
+  const firstSat=pts.findIndex(p=>p.sat);
+  if(firstSat>=0){
+    const xFrom=nx(pts[firstSat].N);
+    c.path('M'+xFrom.toFixed(1)+','+ny(0).toFixed(1)+' L'+c.x1+','+ny(0).toFixed(1)
+      +' L'+c.x1+','+ny(Tmax).toFixed(1)+' L'+xFrom.toFixed(1)+','+ny(Tmax).toFixed(1)+' Z','none',0,null,'rgba(224,93,93,.08)');
+    c.text('saturated (N ≥ '+pts[firstSat].N+')',Math.min(xFrom+8,c.x1-10),ny(Tmax)+14,'var(--bad)',10.5,'start');
+  }
+  /* mean-latency line + soft area */
+  let d='',a='';
+  pts.forEach((p,i)=>{
+    const X=nx(p.N).toFixed(1), Y=ny(p.T).toFixed(1);
+    d+=(i?' L':'M')+X+','+Y;
+  });
+  a='M'+nx(pts[0].N).toFixed(1)+','+ny(0).toFixed(1)+' L'
+    +pts.map(p=>nx(p.N).toFixed(1)+','+ny(p.T).toFixed(1)).join(' L')
+    +' L'+nx(pts[pts.length-1].N).toFixed(1)+','+ny(0).toFixed(1)+' Z';
+  c.path(a,'none',0,null,'rgba(90,169,230,.10)');
+  c.path(d,'var(--accent)',2.5);
+  if(knee){
+    c.circle(nx(knee.N),ny(knee.T),4.5,'var(--warn)');
+    c.text('knee N='+knee.N+' → latency grows fastest here',nx(knee.N),ny(knee.T)-10,'var(--warn)',10.5);
+  }
+  for(let i=0;i<=4;i++){ const nv=1+Math.round((Nmax-1)*i/4); c.text(''+nv,nx(nv),c.H-12,'var(--muted)',10.5); }
   c.text('N agents',c.x1-2,c.H-2,'var(--muted)',10,'end');
   box.innerHTML=c.out();
 }
 
 /* ---------------- per-station table (any K) ---------------- */
 function drawTable(){
-  const S=A&&A.sol, h=$('tblh'), b=$('tblb');
-  if(!S){ h.innerHTML=''; b.innerHTML=''; return; }
-  const mcOn=(MODE!=='A')&&MC;
-  h.innerHTML='<tr><th>station</th><th>λ=X</th><th>ρ/server</th><th>P(wait&gt;0)</th><th>Wq</th><th>delay share</th>'
-    +'<th>R=τ+Wq</th><th>soj p50</th><th>p95</th><th>p99</th>'+(mcOn?'<th>MC Wq</th>':'')+'</tr>';
+  const S=A&&A.sol, h=$('tblh'), b=$('tblb'), note=$('tblNote');
+  if(!S){ h.innerHTML=''; b.innerHTML=''; if(note) note.textContent=''; return; }
+  const mcOn=mcFresh();
+  h.innerHTML='<tr><th>station</th><th>throughput (1/s)</th><th>ρ per server</th><th>P(wait&gt;0)</th>'
+    +'<th>queue wait Wq (s)</th><th>delay share</th><th>R = τ+Wq (s)</th>'
+    +'<th>sojourn p50 (s)</th><th>p95 (s)</th><th>p99 (s)</th>'+(mcOn?'<th>MC wait (s)</th>':'')+'</tr>';
+  if(note){
+    if(MODE==='M'||MODE==='C'){
+      note.textContent = mcOn
+        ? 'Analytic columns from the closed-loop solve · "MC wait" column measured by the simulation (fresh).'
+        : 'Analytic columns from the closed-loop solve · MC column hidden — simulation is stale from a previous parameter set; press Recompute.';
+    } else {
+      note.textContent='All columns from the analytic engine (Monte Carlo tab adds simulation-measured columns).';
+    }
+  }
   function row(i){
     const s=S.st[i], soj=sojournStats(s);
     return '<tr><td>'+s.name+'</td><td>'+f3(S.X)+'</td><td>'+s.rho.toFixed(3)+'</td><td>'
-      +(s.mix.pi*100).toFixed(1)+'%</td><td>'+f2(s.Wq)+'s</td><td>'+(s.Wq/S.T*100).toFixed(1)+'%</td>'
-      +'<td>'+f2(s.R)+'s</td><td>'+f2(soj.p50)+'s</td><td>'+f2(soj.p95)+'s</td><td>'+f2(soj.p99)+'s</td>'
-      +(mcOn?'<td>'+f2(MC.mw[i])+'s</td>':'')+'</tr>';
+      +(s.mix.pi*100).toFixed(1)+'%</td><td>'+f2(s.Wq)+'</td><td>'+(s.Wq/S.T*100).toFixed(1)+'%</td>'
+      +'<td>'+f2(s.R)+'</td><td>'+f2(soj.p50)+'</td><td>'+f2(soj.p95)+'</td><td>'+f2(soj.p99)+'</td>'
+      +(mcOn?'<td>'+f2(MC.mw[i])+'</td>':'')+'</tr>';
   }
   b.innerHTML=S.st.map((s,i)=>row(i)).join('');
+}
+
+/* ---------------- dynamic loop diagram (matches the station list) ---------------- */
+function buildFlow(){
+  const box=document.getElementById('flowBox'); if(!box) return;
+  const sts=STATIONS;
+  const W=580, H=150;
+  const n=Math.max(1,sts.length);
+  const bw=Math.min(150, (W-120-(n-1)*14)/n);
+  const gap=n>1?(W-110-n*bw)/(n-1):0;
+  let svg='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="closed loop diagram">';
+  svg+='<defs><marker id="fa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">'
+      +'<path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs>';
+  /* agents box */
+  svg+='<rect x="10" y="44" width="84" height="46" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>';
+  svg+='<text x="52" y="63" text-anchor="middle" fill="var(--text)" font-size="12" font-family="ui-monospace,Menlo,monospace">N agents</text>';
+  svg+='<text x="52" y="79" text-anchor="middle" fill="var(--muted)" font-size="10" font-family="ui-monospace,Menlo,monospace">closed loop</text>';
+  /* think arrow into first station */
+  const x0=94, x1=94+Math.min(60,gap||50);
+  svg+='<line x1="'+x0+'" y1="56" x2="'+(94+bw)+'" y2="56" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#fa)"/>';
+  svg+='<text x="'+(94+bw/2)+'" y="47" text-anchor="middle" fill="var(--warn)" font-size="10" font-family="ui-monospace,Menlo,monospace">think τ</text>';
+  /* station boxes */
+  sts.forEach((s,i)=>{
+    const bx=94+i*(bw+gap);
+    svg+='<rect x="'+bx+'" y="66" width="'+bw+'" height="48" rx="8" fill="var(--panel2)" stroke="var(--accent)"/>';
+    const nm=String(s.name).length>14?String(s.name).slice(0,13)+'…':s.name;
+    svg+='<text x="'+(bx+bw/2)+'" y="84" text-anchor="middle" fill="var(--text)" font-size="11.5" font-family="ui-monospace,Menlo,monospace">'+nm+'</text>';
+    svg+='<text x="'+(bx+bw/2)+'" y="100" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="ui-monospace,Menlo,monospace">τ='+s.tau+'s · c='+s.c+' · SCV='+s.scv+'</text>';
+    if(i<sts.length-1){
+      const ax=bx+bw;
+      svg+='<line x1="'+ax+'" y1="90" x2="'+(ax+gap)+'" y2="90" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#fa)"/>';
+    }
+  });
+  /* return arrow */
+  const lastX=94+(n-1)*(bw+gap)+bw;
+  svg+='<path d="M '+lastX+' 122 C '+lastX+' 142 52 142 52 92" fill="none" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#fa)"/>';
+  svg+='<text x="'+((lastX+52)/2)+'" y="139" text-anchor="middle" fill="var(--muted)" font-size="9.5" font-family="ui-monospace,Menlo,monospace">response → think again</text>';
+  svg+='</svg>';
+  box.innerHTML=svg;
 }
 
 /* ---------------- station editor ---------------- */
@@ -993,9 +1072,10 @@ function renderStations(){
     btn.addEventListener('click',()=>{
       if(STATIONS.length<=1) return;
       STATIONS.splice(+btn.getAttribute('data-del'),1);
-      renderStations(); schedule();
+      renderStations(); buildFlow(); schedule();
     });
   });
+  buildFlow();
 }
 function setupEditor(){
   $('preset2').addEventListener('click',()=>{ STATIONS=PRESETS.preset2.map(x=>Object.assign({},x)); renderStations(); schedule(); });
@@ -1012,8 +1092,7 @@ let deb=null;
 function schedule(){
   clearTimeout(deb);
   deb=setTimeout(()=>{
-    computeAnalytic();
-    if(MODE!=='A'&&mcStale()) banner('warn','Parameters changed — press Recompute to refresh the Monte Carlo.');
+    computeAnalytic();   /* banner() appends the stale-MC note automatically when applicable */
   },150);
 }
 function computeAll(){

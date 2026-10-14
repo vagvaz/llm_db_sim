@@ -4,6 +4,19 @@
  * sim-clock: request dots ride the topology wiring, queue cylinders fill with
  * ``queue_depth`` levels, slot bars light with ``slot_busy`` occupancy, links
  * glow on network activity. Playback freezes on the run's final frame.
+ *
+ * Fidelity contracts (live-loop review):
+ * 1. HUD token counters never look frozen. Counter *events* only fire at
+ *    service start/end, so the view paces each request's billed tokens
+ *    continuously at the endpoint's configured aggregate tok/s (exactly the
+ *    saturation behaviour the scenario predicts), and snaps to the exact
+ *    authoritative event totals when playback freezes at the run end.
+ * 2. The page follows the server-current run: ``/live/state`` is polled; a
+ *    new ``run_id`` (form *or* API launch) re-adopts the stream and rebuilds
+ *    the scene from the new run's resolved config.
+ * 3. A pill says which: ``live`` while the server run is running, ``replay``
+ *    while catching up on an already-finished run, ``done``/``error`` at the
+ *    end of playback.
  */
 (function () {
   "use strict";
@@ -17,9 +30,10 @@
     if (parent) parent.appendChild(n);
     return n;
   }
-  function txt(parent, cls, x, y, s, anchor) {
-    var t = el("text", { x: x, y: y, class: cls,
-      "text-anchor": anchor || "start" }, parent);
+  function txt(parent, cls, x, y, s, anchor, id) {
+    var a = { x: x, y: y, class: cls, "text-anchor": anchor || "start" };
+    if (id) a.id = id;
+    var t = el("text", a, parent);
     t.textContent = s;
     return t;
   }
@@ -45,8 +59,16 @@
   var S = {
     speed: 1, queue: [], qi: 0, cursor: null, lastT: 0,
     streamDone: false, playing: false, error: null, runId: null, until: 0,
-    counters: { tokens_in: 0, tokens_out: 0 }, dots: [],
+    status: null,
+    // authoritative event totals + continuously-paced display values:
+    // events bill a request's tokens at service start (input) / completion
+    // (output); the view drains the pending pool at the configured aggregate
+    // tok/s so counters move every second of playback on any loaded run.
+    counters: { in_auth: 0, out_auth: 0, in_disp: 0, out_disp: 0,
+      in_pending: 0, out_pending: 0 },
+    dots: [],
   };
+  window.__live = S; // test/verification hook
   var MAX_AGENTS = 10, MAX_SLOTS = 16, MAX_NODES = 4;
   var M = null, SC = null;
 
@@ -185,8 +207,10 @@
       (M.llm.slots > nb ? " (" + nb + " shown)" : ""));
     M.llm.bars = slotRow(lg, lx + 108, ly + 100, nb,
       clamp(Math.floor(110 / nb), 6, 22), 4, 140);
-    M.llm.counterTxt = txt(lg, "n-val", lx + 14, ly + lh - 44, "in 0 · out 0");
-    M.llm.flowTxt = txt(lg, "n-val", lx + 14, ly + lh - 22, "req 0 · served 0");
+    M.llm.counterTxt = txt(lg, "n-val", lx + 14, ly + lh - 44, "in 0 · out 0",
+      "start", "hud-tokens");
+    M.llm.flowTxt = txt(lg, "n-val", lx + 14, ly + lh - 22, "req 0 · served 0",
+      "start", "hud-flow");
 
     /* DB endpoint shell */
     var dbX = 640, dbY = 70, dbW = 634, dbH = 590;
@@ -325,8 +349,15 @@
     }
     if (kind === "counter") {
       if (leaf === "tokens_input" || leaf === "tokens_output") {
-        if (typeof value === "number")
-          S.counters[leaf === "tokens_input" ? "tokens_in" : "tokens_out"] += value;
+        if (typeof value === "number") {
+          // bill the request's tokens into the pending pool; paint() drains
+          // it at the configured aggregate rate (see header note)
+          if (leaf === "tokens_input") {
+            S.counters.in_auth += value; S.counters.in_pending += value;
+          } else {
+            S.counters.out_auth += value; S.counters.out_pending += value;
+          }
+        }
         return;
       }
       var nc = nodeOf(classify(comp || segs.slice(0, -1).join(".")));
@@ -372,14 +403,31 @@
   /* ------------------------------------------------------------------ */
   /* dots                                                                */
   /* ------------------------------------------------------------------ */
+  var DOT_MIN_MS = 520;   // minimum visible travel wall-time per request dot
+  var DOT_PER_LINK = 14;  // pile-up cap so fast churn stays readable
+
   function spawnDot(linkId, color) {
     if (!SC || !SC.links[linkId]) return;
     var path = SC.links[linkId].path;
+    // never shorter than the minimum travel: fast-churn runs must show
+    // continuous traffic, not one-frame blinks between screenshots
+    var dur = Math.max(DOT_MIN_MS, 1600 / S.speed);
+    var live = 0;
+    for (var i = 0; i < S.dots.length; i++)
+      if (S.dots[i].link === linkId) live++;
+    if (live >= DOT_PER_LINK) {  // retire this link's oldest dot
+      for (i = 0; i < S.dots.length; i++)
+        if (S.dots[i].link === linkId) {
+          var dead = S.dots.splice(i, 1)[0];
+          if (dead.c.parentNode) dead.c.parentNode.removeChild(dead.c);
+          break;
+        }
+    }
     var c = el("circle", { class: "req-dot", r: 4.5, fill: color,
       filter: "url(#glow)" }, SC.dotsLayer);
-    S.dots.push({ c: c, path: path, len: path.getTotalLength(),
-      t0: performance.now(), dur: clamp(1600 / S.speed, 130, 1600) });
-    if (S.dots.length > 150) {
+    S.dots.push({ c: c, path: path, link: linkId, len: path.getTotalLength(),
+      t0: performance.now(), dur: dur });
+    if (S.dots.length > 300) {
       var old = S.dots.shift();
       if (old.c.parentNode) old.c.parentNode.removeChild(old.c);
     }
@@ -389,8 +437,9 @@
   /* ------------------------------------------------------------------ */
   /* playback loop                                                       */
   /* ------------------------------------------------------------------ */
-  var lastFrame = 0;
+  var lastFrame = 0, rafId = null;
   function frame(now) {
+    rafId = null;
     if (!S.playing) return;
     var dt = Math.min((now - lastFrame) / 1000, 0.25); lastFrame = now;
     if (S.cursor === null && S.queue.length) S.cursor = S.queue[0][0];
@@ -399,10 +448,15 @@
       if (target > S.lastT) target = S.lastT;
       while (S.qi < S.queue.length && S.queue[S.qi][0] <= target) applyRow(S.queue[S.qi++]);
       S.cursor = target;
-      if (S.streamDone && S.cursor >= S.lastT) { freezeAtEnd(); paint(dt); return; }
+      if (S.streamDone && S.cursor >= S.lastT) { freezeAtEnd(); return; }
     }
     paint(dt);
-    requestAnimationFrame(frame);
+    rafId = requestAnimationFrame(frame);
+  }
+  function startPlayback() {
+    if (S.playing) return;
+    S.playing = true; lastFrame = performance.now();
+    if (rafId === null) rafId = requestAnimationFrame(frame);
   }
 
   function ease(cur, tgt, dt) { return cur + (tgt - cur) * (1 - Math.exp(-3.2 * dt)); }
@@ -424,12 +478,25 @@
       n.busy = ease(n.busy, n.busyTarget, dt);
       setSlots(n.bars, n.busy);
     });
+    // token counters: drain the billed-pending pool at the endpoint's
+    // configured aggregate tok/s so the HUD moves continuously on playback
+    // even when events only bill at service boundaries (see header note).
+    var c = S.counters;
+    var simDt = dt * S.speed;
+    var din = c.in_pending > 0
+      ? Math.min(c.in_pending, (M.rates.in > 0 ? M.rates.in * simDt : c.in_pending))
+      : 0;
+    var dout = c.out_pending > 0
+      ? Math.min(c.out_pending, (M.rates.out > 0 ? M.rates.out * simDt : c.out_pending))
+      : 0;
+    c.in_disp += din; c.in_pending -= din;
+    c.out_disp += dout; c.out_pending -= dout;
     if (M.llm.flowTxt) M.llm.flowTxt.textContent =
       "req " + Math.round(M.llm.requests || 0) + " · served " + Math.round(M.llm.served || 0);
     if (M.llm.counterTxt) M.llm.counterTxt.textContent =
-      "in " + Math.round(S.counters.tokens_in) + " · out " + Math.round(S.counters.tokens_out);
-    M.db.compute.forEach(function (c) {
-      if (c.servedTxt) c.servedTxt.textContent = "served " + Math.round(c.served || 0);
+      "in " + Math.round(c.in_disp) + " · out " + Math.round(c.out_disp);
+    M.db.compute.forEach(function (cc) {
+      if (cc.servedTxt) cc.servedTxt.textContent = "served " + Math.round(cc.served || 0);
     });
     M.db.storage.forEach(function (s) {
       if (s.busyTxt) s.busyTxt.textContent =
@@ -441,6 +508,7 @@
       if (f >= 1) { if (d.c.parentNode) d.c.parentNode.removeChild(d.c); return false; }
       var pt = d.path.getPointAtLength(d.len * f);
       d.c.setAttribute("transform", "translate(" + pt.x + "," + pt.y + ")");
+      d.c.setAttribute("opacity", f > 0.82 ? String((1 - f) / 0.18) : "1");
       return true;
     });
     for (var k in SC.links) {
@@ -455,6 +523,11 @@
 
   function freezeAtEnd() {
     S.playing = false;
+    // playback caught the whole run: show the exact authoritative totals
+    var c = S.counters;
+    c.in_disp = c.in_auth; c.out_disp = c.out_auth;
+    c.in_pending = 0; c.out_pending = 0;
+    paint(0.001);
     setPill(S.error ? "error" : "done");
     $("clock").textContent = S.lastT.toFixed(2);
     $("bar").style.width = "100%";
@@ -465,26 +538,49 @@
   /* SSE                                                                 */
   /* ------------------------------------------------------------------ */
   var es = null;
+
+  function resetPlayback() {
+    S.queue = []; S.qi = 0; S.cursor = null; S.lastT = 0;
+    S.streamDone = false; S.playing = false; S.error = null;
+    S.donePayload = null;
+    S.dots.forEach(function (d) {
+      if (d.c.parentNode) d.c.parentNode.removeChild(d.c);
+    });
+    S.dots = [];
+    S.counters = { in_auth: 0, out_auth: 0, in_disp: 0, out_disp: 0,
+      in_pending: 0, out_pending: 0 };
+    $("finish").classList.add("hidden");
+    $("bar").style.width = "0%";
+  }
+
+  function applyInit(d) {
+    // every init (fresh connect, run switch, EventSource reconnect replays
+    // from row 0) reseats the scene from *this* run's resolved config
+    S.runId = d.run_id; S.until = d.until || 0; S.status = d.status || "running";
+    resetPlayback();
+    M = buildModel(d.config);
+    renderScene();
+    updatePill();
+    var live = S.status === "running" || S.status === "starting";
+    $("launch").disabled = live;
+    $("form-msg").textContent = live
+      ? "streaming live run " + d.run_id
+      : "replaying finished run " + d.run_id;
+    $("form-msg").className = "msg ok";
+    startPlayback();
+  }
+
   function connectStream() {
     if (es) return;
     es = new EventSource("/live/stream");
-    es.addEventListener("init", function (e) {
-      var d = JSON.parse(e.data);
-      S.until = d.until || 0; S.runId = d.run_id;
-      if (!M) { M = buildModel(d.config); renderScene(); }
-      setPill("running");
-      $("form-msg").textContent = "streaming live run " + d.run_id;
-      $("form-msg").className = "msg ok";
-      $("launch").disabled = true;
-      if (!S.playing) { S.playing = true; lastFrame = performance.now();
-        requestAnimationFrame(frame); }
-    });
+    es.addEventListener("init", function (e) { applyInit(JSON.parse(e.data)); });
     es.addEventListener("delta", function (e) {
       var d = JSON.parse(e.data);
       (d.rows || []).forEach(function (r) {
         S.queue.push(r);
         if (r[0] > S.lastT) S.lastT = r[0];
       });
+      startPlayback();
     });
     es.addEventListener("done", function (e) {
       var d = JSON.parse(e.data);
@@ -494,8 +590,19 @@
       S.donePayload = d;
       if (es) { es.close(); es = null; }
       $("launch").disabled = false;
-      // if playback already caught up (or nothing to play), freeze now
+      // the server run is over: still-catching-up playback is a REPLAY,
+      // already caught up freezes on the last frame
       if (!S.playing || S.cursor === null || S.cursor >= S.lastT) freezeAtEnd();
+      else updatePill();
+    });
+    es.addEventListener("error", function (e) {
+      // named SSE "error" event (no run yet) carries a detail payload
+      if (e.data) {
+        try {
+          var d = JSON.parse(e.data);
+          if (d.detail) $("form-msg").textContent = d.detail;
+        } catch (err) { /* transport-level retry errors have no data */ }
+      }
     });
   }
 
@@ -507,8 +614,44 @@
       "'>open report</a> · <a href='" + d.vcd + "'>raw VCD</a>";
   }
 
+  /* ------------------------------------------------------------------ */
+  /* pill: LIVE only when the SERVER run is running; REPLAY while the    */
+  /* page catches up on a run the server already finished                */
+  /* ------------------------------------------------------------------ */
+  function updatePill() {
+    if (S.error) return setPill("error");
+    if (S.streamDone) {
+      var caught = !S.playing || S.cursor === null || S.cursor >= S.lastT;
+      return setPill(caught ? "done" : "replay");
+    }
+    if (S.status === "done" || S.status === "error") return setPill("replay");
+    if (S.status === "running" || S.status === "starting") return setPill("live");
+    setPill("idle");
+  }
+
   function setPill(cls) {
     var p = $("pill"); p.className = "pill " + cls; p.textContent = cls;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* follow the server-current run                                       */
+  /* ------------------------------------------------------------------ */
+  var STATE_POLL_MS = 2000;
+
+  function pollState() {
+    fetch("/live/state").then(function (r) { return r.json(); }).then(function (st) {
+      if (!st || !st.run_id) {
+        if (!es && !S.runId) setPill("idle");
+        return;
+      }
+      if (st.run_id !== S.runId) {   // form-OR-API-launched new run: re-adopt
+        if (es) { es.close(); es = null; }
+        connectStream();
+        return;
+      }
+      S.status = st.status;          // same run: keep pill honest (e.g. the
+      updatePill();                  // stream died before delivering "done")
+    }).catch(function () { /* server briefly unreachable; retry next tick */ });
   }
 
   /* ------------------------------------------------------------------ */
@@ -559,11 +702,7 @@
       return r.json().then(function (j) { return { code: r.status, j: j }; });
     }).then(function (res) {
       if (res.code === 202) {
-        M = null;
-        S.queue = []; S.qi = 0; S.cursor = null; S.lastT = 0;
-        S.streamDone = false; S.playing = false; S.error = null;
-        S.dots = []; S.counters = { tokens_in: 0, tokens_out: 0 };
-        $("finish").classList.add("hidden");
+        // the new run's init event reseats the scene/queue/counters
         if (es) { es.close(); es = null; }
         connectStream();
       } else {
@@ -584,9 +723,6 @@
   });
 
   loadScenarios();
-  fetch("/live/state").then(function (r) { return r.json(); }).then(function (st) {
-    if (!st || st.status === "idle") { setPill("idle"); return; }
-    if (st.error) { $("form-msg").textContent = st.error; }
-    connectStream();
-  }).catch(function () { setPill("idle"); });
+  pollState();
+  setInterval(pollState, STATE_POLL_MS);
 })();

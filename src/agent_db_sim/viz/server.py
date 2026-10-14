@@ -16,6 +16,7 @@
 - ``POST /live/run``    launch one live run (rejects concurrent runs, 409)
 - ``GET /live/state``   live-run slot status (JSON)
 - ``GET /live/stream``  SSE: live ``metrics.db`` sample rows -> ``delta`` events
+                         (~2 Hz tail poll so the HUD advances every second)
 - ``GET /live/run/<id>/report`` / ``.../vcd``  artifacts of a finished live run
 
 SSE tail discipline per ticket 01: the server holds back the newest
@@ -58,6 +59,9 @@ METRICS_NAME = "metrics.db"
 
 # stream poll cadence: ~1 Hz delta events per ticket-01 answer
 POLL_INTERVAL = 1.0
+# live-view tail poll: ~2 Hz so HUD counters visibly advance every second
+# even when the writer commits land at 1 Hz sim-tick boundaries
+LIVE_POLL_INTERVAL = 0.5
 # a run counts as live while its VCD was touched within this window
 LIVE_WINDOW = 10.0
 # optional idle cap (None = unbounded keepalives while the run stays live)
@@ -73,7 +77,7 @@ def create_app(
     sweeps_root: Optional[str] = None,
     live_root: Optional[str] = None,
     scenarios_root: Optional[str] = None,
-    live_poll: float = POLL_INTERVAL,
+    live_poll: float = LIVE_POLL_INTERVAL,
 ) -> FastAPI:
     """Build the visualization app around one run directory.
 

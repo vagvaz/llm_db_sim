@@ -95,7 +95,10 @@
           <i class="sw completed"></i>done <i class="sw transfer"></i>in flight</p>
         <p class="hint">cylinders are queues (depth), bars are slot occupancy,
           dots are requests riding the wiring. The view plays streamed samples
-          on its own sim-clock; it pauses when the run ends.</p>
+          on its own sim-clock; token counters pace billed tokens at the
+          endpoint's configured tok/s and snap to exact totals at the end.
+          <b>LIVE</b> = the server run is running, <b>REPLAY</b> = playback of
+          a finished run.</p>
       </div>
       <div id="finish" class="finish hidden"></div>
     </aside>

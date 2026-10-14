@@ -62,8 +62,11 @@ nav.links a.here { color: var(--green); border-bottom-color: var(--green); }
   padding: .22rem .7rem; border-radius: 999px; border: 1px solid var(--line);
 }
 .pill.idle      { color: var(--dim); }
-.pill.running   { color: var(--amber); border-color: var(--amber);
-  box-shadow: 0 0 12px -2px var(--amber); }
+.pill.running,
+.pill.live      { color: var(--amber); border-color: var(--amber);
+  box-shadow: 0 0 12px -2px var(--amber); animation: pulse 1.6s ease-in-out infinite; }
+.pill.replay    { color: var(--violet); border-color: var(--violet);
+  box-shadow: 0 0 10px -4px var(--violet); }
 .pill.done      { color: var(--green); border-color: var(--green); }
 .pill.error     { color: var(--red); border-color: var(--red); }
 .clock { font-size: .95rem; color: var(--cyan); min-width: 6.5ch; text-align: right; }

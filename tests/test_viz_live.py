@@ -306,3 +306,85 @@ def test_samples_tail_missing_db(tmp_path: Path) -> None:
     tail = SamplesTail(tmp_path / "nope.db")
     assert tail.since() == []
     tail.close()
+
+
+# --------------------------------------------------------------------- #
+# live-fidelity regressions (loop review #1)                             #
+# --------------------------------------------------------------------- #
+
+def test_init_event_labels_finished_run_as_done(tmp_path: Path) -> None:
+    """``init`` carries the SERVER run status so the page can show REPLAY
+    (not LIVE) while playing back a run that already finished."""
+    client = TestClient(_app(tmp_path))
+    r = client.post(
+        "/live/run",
+        json={"scenario": "sanity/sanity_single.yaml",
+              "overrides": {"sim.until": 12}},
+    )
+    assert r.status_code == 202
+    st = _wait_done(client)
+    assert st["status"] == "done"
+    events = _events(client, "/live/stream")
+    assert events[0]["event"] == "init"
+    assert events[0]["data"]["status"] == "done"
+    assert events[0]["data"]["run_id"] == st["run_id"]
+
+
+def test_page_state_follows_new_run(tmp_path: Path) -> None:
+    """/live/state + a fresh stream always describe the CURRENT run: the
+    page's state-poller detects the changed run_id and re-adopts, and the
+    new init carries the NEW run's resolved config (scene rebuild source)."""
+    client = TestClient(_app(tmp_path))
+    a = client.post(
+        "/live/run",
+        json={"scenario": "sanity/sanity_single.yaml",
+              "overrides": {"sim.until": 10}},
+    ).json()
+    _wait_done(client)
+    assert client.get("/live/state").json()["run_id"] == a["run_id"]
+
+    b = client.post(
+        "/live/run",
+        json={"scenario": "sanity/sanity_single.yaml",
+              "overrides": {"sim.until": 8, "agents.count": 3}},
+    ).json()
+    assert b["run_id"] != a["run_id"]
+    st = client.get("/live/state").json()
+    assert st["run_id"] == b["run_id"]          # state follows the server
+    assert st["status"] in ("starting", "running", "done", "error")
+    # a stream attached after the switch inits with run B's identity + config
+    init = _events(client, "/live/stream")[0]["data"]
+    assert init["run_id"] == b["run_id"]
+    assert init["config"]["agents"]["count"] == 3
+    assert init["until"] == 8.0
+    _wait_done(client)
+
+
+def test_counter_rows_reach_db_at_tick_boundaries(tmp_path: Path) -> None:
+    """The streaming collector commits samples to ``metrics.db`` at
+    ``sample_interval`` tick boundaries — mid-run, without finalize — so
+    the page's tail poll sees token counters while the run is live."""
+    from agent_db_sim.metrics.collect import RunCollector
+    from agent_db_sim.simkit.probes import Sample
+
+    run = tmp_path / "cadence"
+    tail = SamplesTail(run / "metrics.db")
+    collector = RunCollector(run, {"warmup": 0.0, "sample_interval": 1.0,
+                                   "batch_size": 10_000})
+    try:
+        collector.push(Sample(t=0.0, signal="llm.tokens_input", kind="counter",
+                              value=512.0, tags={"component": "llm"}))
+        assert [r[1] for r in tail.since()] == [0.0]  # first tick flushes
+
+        collector.push(Sample(t=0.5, signal="llm.tokens_input", kind="counter",
+                              value=512.0, tags={"component": "llm"}))
+        assert tail.since() == []  # inside the interval: still buffered
+
+        collector.push(Sample(t=1.2, signal="llm.slot_busy", kind="level",
+                              value=1.0, tags={"component": "llm"}))
+        rows = tail.since()  # tick boundary: 0.5 + 1.2 committed, no finalize
+        assert [r[1] for r in rows] == [0.5, 1.2]
+        assert rows[0][3] == "counter" and rows[0][4] == 512.0
+    finally:
+        tail.close()
+        collector.abort()

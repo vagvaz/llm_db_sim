@@ -196,6 +196,8 @@ agents:                 # the AgentClient fleet (required for a full run)
       complexity: 0.6
       volume: 2.0
       weight: 0.2
+  initial_step:         # optional {llm:, db:} weights (sum to 1); the per-agent
+                        # draw at construct picks the workflow's first step
 
 llm:                    # the LLMEndpoint
   slots: 8              # Slot pool size (per-endpoint)

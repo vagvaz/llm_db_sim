@@ -790,3 +790,210 @@ def test_parse_workflow_unit_contract() -> None:
     assert mix.draw(Fixed(0.0)).name == "a"
     assert mix.draw(Fixed(0.25)).name == "b"
     assert mix.draw(Fixed(0.99)).name == "b"
+
+
+# --------------------------------------------------------------------------- #
+# initial_step: configurable first-request kind (drawn once at construct)      #
+# --------------------------------------------------------------------------- #
+
+def test_initial_step_absent_starts_at_template_step_zero() -> None:
+    # default legacy template [inference, db]: step 0 is inference -> "llm"
+    client, _ = construct_workflow(AGENT_CFG)
+    assert client.agent_initial_steps == ("llm",) * client.count
+
+    # a template that starts with a db step -> step-0 kind is "db"
+    cfg = dict(
+        AGENT_CFG,
+        count=2,
+        workflow={"templates": [{"name": "dbfirst", "steps": ["db", "inference"]}]},
+    )
+    client, _ = construct_workflow(cfg)
+    assert client.agent_initial_steps == ("db", "db")
+
+    # and the loop really starts at step 0: first submit matches template[0] at t=0
+    sink, _, _, _, db = run_agents(cfg, llm_delay=3.0, db_delay=1.0, until=5.0)
+    dbh = edges(sink, f"{AGENT_ID}.db")
+    assert dbh[0].t == 0.0 and dbh[0].value == "submitted"
+    assert db.submitted[0].params["workflow_step"] == 0
+
+
+def test_initial_step_attr_on_every_trace_event_and_request() -> None:
+    # absent config: the attr is still present, named after step-0's kind
+    sink, _, client, llm, db = run_agents(AGENT_CFG, until=5.0)
+    assert all(s.tags["initial_step"] == "llm" for s in sink.samples)
+    assert all(r.params["initial_step"] == "llm" for r in llm.submitted)
+    assert all(r.params["initial_step"] == "llm" for r in db.submitted)
+
+    # db-first template: the attr names the kind of the step that is walked first
+    cfg = dict(
+        AGENT_CFG,
+        workflow={"templates": [{"name": "dbfirst", "steps": ["db", "inference"]}]},
+    )
+    sink, _, client, llm, db = run_agents(cfg, until=5.0)
+    assert all(s.tags["initial_step"] == "db" for s in sink.samples)
+    assert all(r.params["initial_step"] == "db" for r in llm.submitted)
+
+
+def test_initial_step_db_weight_one_forces_db_first_submit_at_t0() -> None:
+    # template [inference, db]; the db draw selects index 1 as the start
+    cfg = dict(AGENT_CFG, initial_step={"llm": 0.0, "db": 1.0})
+    sink, collected, client, llm, db = run_agents(
+        cfg, llm_delay=3.0, db_delay=1.0, until=6.0
+    )
+    assert client.agent_initial_steps == ("db",)
+
+    # first submit is a DB query at t=0 (no LLM head before it)
+    dbh = edges(sink, f"{AGENT_ID}.db")
+    infinity = edges(sink, f"{AGENT_ID}.inference")
+    assert [(s.t, s.value, s.tags["workflow_step"]) for s in dbh] == [
+        (0.0, "submitted", 1), (1.0, "received", 1),
+        (4.0, "submitted", 1), (5.0, "received", 1),
+    ]
+    # then the template continues from the next step: inference at index 0
+    assert [(s.t, s.value, s.tags["workflow_step"]) for s in infinity] == [
+        (1.0, "submitted", 0), (4.0, "received", 0),
+        (5.0, "submitted", 0),
+    ]
+
+    first_db = db.submitted[0]
+    assert first_db.params["workflow_step"] == 1
+    assert first_db.params["kind"] == "db_query"
+    assert first_db.params["parent_id"] is None  # no inference seen yet
+    assert first_db.params["initial_step"] == "db"
+    # sequence numbering shared across kinds: the db hit took request #1,
+    # so the first LLM call is #2
+    assert llm.submitted[0].params["request_id"] == f"{AGENT_ID}#2"
+    assert llm.submitted[0].params["initial_step"] == "db"
+
+
+def test_initial_step_llm_weight_one_forces_inference_first_submit_at_t0() -> None:
+    # template starts with a db step, but llm weight 1 forces the FIRST
+    # inference step (index 1) as the start of the loop
+    cfg = dict(
+        AGENT_CFG,
+        initial_step={"llm": 1.0},
+        workflow={"templates": [{"name": "dbfirst", "steps": ["db", "inference"]}]},
+    )
+    sink, collected, client, llm, db = run_agents(
+        cfg, llm_delay=3.0, db_delay=1.0, until=6.0
+    )
+    assert client.agent_initial_steps == ("llm",)
+
+    infinity = edges(sink, f"{AGENT_ID}.inference")
+    dbh = edges(sink, f"{AGENT_ID}.db")
+    assert [(s.t, s.value, s.tags["workflow_step"]) for s in infinity] == [
+        (0.0, "submitted", 1), (3.0, "received", 1),
+        (4.0, "submitted", 1),
+    ]
+    assert [(s.t, s.value, s.tags["workflow_step"]) for s in dbh] == [
+        (3.0, "submitted", 0), (4.0, "received", 0),
+    ]
+    first_llm = llm.submitted[0]
+    assert first_llm.params["kind"] == "inference"
+    assert first_llm.params["workflow_step"] == 1
+    assert first_llm.params["initial_step"] == "llm"
+    assert first_llm.params["request_id"] == f"{AGENT_ID}#1"
+
+
+def test_initial_step_mix_draw_counts_match_the_named_stream_exactly() -> None:
+    # 250 agents over 0.3/0.7; the counts are exact: replicate the same
+    # named RNG stream the implementation draws from
+    from random import Random
+
+    from agent_db_sim.simkit.component import master_seed
+
+    seed = master_seed({"sim": {"seed": 3}})  # construct_workflow seeds with 3
+    cfg = dict(AGENT_CFG, count=250, initial_step={"llm": 0.3, "db": 0.7})
+
+    client_a, _ = construct_workflow(cfg)
+    client_b, _ = construct_workflow(cfg)  # same seed -> same draws
+    assert client_b.agent_initial_steps == client_a.agent_initial_steps
+
+    expected = [
+        "llm" if Random(f"{seed}/{aid}/initial_step").random() < 0.3 else "db"
+        for aid in client_a.agent_ids
+    ]
+    assert client_a.agent_initial_steps == tuple(expected)
+
+    counts = Counter(client_a.agent_initial_steps)
+    assert counts["llm"] == Counter(expected)["llm"]
+    assert counts["db"] == Counter(expected)["db"]
+    assert counts["llm"] > 0 and counts["db"] > 0  # the mix is really mixed
+
+
+def test_initial_step_config_fail_fast() -> None:
+    # negative weight
+    with pytest.raises(ComponentError, match="must be >= 0"):
+        construct_workflow(
+            dict(AGENT_CFG, initial_step={"llm": -0.2, "db": 1.2})
+        )
+
+    # weights that don't sum to 1 (too short and too much)
+    with pytest.raises(ComponentError, match="sum to 1"):
+        construct_workflow(dict(AGENT_CFG, initial_step={"llm": 0.6, "db": 0.3}))
+    with pytest.raises(ComponentError, match="sum to 1"):
+        construct_workflow(
+            dict(AGENT_CFG, initial_step={"llm": 0.6, "db": 0.5})
+        )
+    # a single key may only be omitted when the other weight is 1.0
+    with pytest.raises(ComponentError, match="sum to 1"):
+        construct_workflow(dict(AGENT_CFG, initial_step={"llm": 0.6}))
+
+    # unknown key names
+    with pytest.raises(ComponentError, match="unknown key"):
+        construct_workflow(
+            dict(AGENT_CFG, initial_step={"llm": 1.0, "sql": 0.0})
+        )
+    # spec must be a mapping (or None)
+    with pytest.raises(ComponentError, match="mapping"):
+        construct_workflow(dict(AGENT_CFG, initial_step=[0.3, 0.7]))
+
+    # the template must have a step of the drawn kind — no silent fallback
+    with pytest.raises(ComponentError, match="no 'db' step"):
+        construct_workflow(
+            dict(
+                AGENT_CFG,
+                initial_step={"llm": 0.0, "db": 1.0},
+                workflow={
+                    "templates": [
+                        {"name": "llm_only", "steps": ["inference", "inference"]}
+                    ]
+                },
+            )
+        )
+    with pytest.raises(ComponentError, match="no 'inference' step"):
+        construct_workflow(
+            dict(
+                AGENT_CFG,
+                initial_step={"llm": 1.0},
+                workflow={"templates": [{"name": "db_only", "steps": ["db", "db"]}]},
+            )
+        )
+
+
+def test_initial_step_stream_independent_of_token_draws() -> None:
+    """The ``initial_step`` draw lives on its own named RNG child stream:
+    adding an ``initial_step:`` config (one extra draw there) must not shift
+    the per-agent token sequence of an agent that still starts at step 0."""
+
+    def first_agent_tokens(extra: Dict[str, Any] | None) -> List[int]:
+        cfg = dict(
+            AGENT_CFG,
+            count=2,
+            output_tokens={"distribution": "gamma", "shape": 2.0, "scale": 80.0},
+        )
+        if extra is not None:
+            cfg["initial_step"] = extra
+        _, _, _, llm, _ = run_agents(cfg, llm_delay=0.1, db_delay=0.1, until=0.99)
+        return [
+            r.params["output_tokens"]
+            for r in llm.submitted
+            if r.params["agent_id"] == "top.agents.agent-0"
+        ]
+
+    baseline = first_agent_tokens(None)
+    forced_llm = first_agent_tokens({"llm": 1.0, "db": 0.0})
+
+    # identical agent configs apart from initial_step -> identical token stream
+    assert baseline == forced_llm
+    assert len(baseline) == 5  # inference submits at 0,0.2,0.4,0.6,0.8

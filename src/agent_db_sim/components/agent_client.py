@@ -44,7 +44,10 @@ workflow_template, workflow_step}`` and the sample value is ``state``
 (``submitted`` at send, ``received`` when the agent observes the result).
 ``workflow_template`` is the assigned template's name (``inference_db`` for
 the legacy default), ``workflow_step`` the 0-based index of the step inside
-the template's sequence (it resets to 0 on each wrap-around). Simulated
+the template's sequence (it resets to 0 on each wrap-around), and
+``initial_step`` the agent's first-request kind (``llm``|``db``: the config
+draw when ``initial_step:`` is configured, else the template's step-0 kind).
+Simulated
 time is passed explicitly (``t=``), so emission is correct whatever the
 sink's clock. ``parent_id`` links a DB query to the inference request whose
 output produced it (None for inference requests). Requests carry their ids
@@ -73,15 +76,24 @@ to the component name; OmegaConf layers work like plain mappings)::
           - {name: simple_qa, steps: [inference, db]}
           - {name: multi_hop, steps: [inference, db, inference, db]}
         mix: [0.5, 0.5]  # per-agent draw weights; default uniform
+      initial_step:      # optional; absent = every agent starts at step 0
+        llm: 0.6         # probability the agent's first request is an LLM call
+        db: 0.4          # probability the agent's first request is a DB query
 
 Each agent draws ONE template from the mix at construct time (its own named
-RNG child stream, see below) and runs it closed-loop.
+RNG child stream, see below) and runs it closed-loop. With ``initial_step:``
+each agent additionally draws one first-request kind (``llm``/``db``) at
+construct time, also from its own named child stream; that draw picks the
+STARTING INDEX of the template (the first step whose kind matches), so the
+first request is submitted at t=0 (no long common LLM head on every agent).
+Weights are ``>= 0``, must sum to 1 (tolerance 1e-9), and either key may be
+omitted only if the other is 1.0; both missing is the same as the key absent.
 
-RNG: no global random anywhere. Every agent gets three named child streams
+RNG: no global random anywhere. Every agent gets four named child streams
 derived deterministically from ``seed/full_path/agent-{i}/{tokens,queries,
-workflow}`` (the same derivation scheme as the simkit Component base), so
-per-agent token, profile and template draws are reproducible and mutually
-independent.
+workflow,initial_step}`` (the same derivation scheme as the simkit Component
+base), so per-agent token, profile, template and first-step draws are
+reproducible and mutually independent.
 """
 
 from __future__ import annotations
@@ -116,6 +128,8 @@ __all__ = [
     "WorkflowMix",
     "parse_workflow",
     "DEFAULT_WORKFLOW_NAME",
+    "InitialStepWeights",
+    "parse_initial_step",
 ]
 
 TokenSampler = Callable[[random.Random, Mapping[str, Any], str], int]
@@ -496,6 +510,66 @@ def parse_workflow(spec: Any, *, what: str = "workflow") -> WorkflowMix:
 
 
 # --------------------------------------------------------------------------- #
+# initial_step: weights for the per-agent first-request kind draw              #
+# --------------------------------------------------------------------------- #
+
+_INITIAL_STEP_KINDS = {"llm": "inference", "db": "db"}
+
+
+@dataclass(frozen=True)
+class InitialStepWeights:
+    """Draw weights for an agent's first-request kind.
+
+    ``llm``/``db`` are probabilities (``>= 0``, summing to 1 within 1e-9);
+    the draw selects the STARTING INDEX of the agent's workflow template
+    (the first step whose kind matches: ``llm`` -> ``inference``, ``db`` ->
+    ``db``), so the first request goes out at t=0.
+    """
+
+    llm: float
+    db: float
+
+
+def parse_initial_step(
+    spec: Any, *, what: str = "initial_step"
+) -> Optional[InitialStepWeights]:
+    """Config ``agents.initial_step`` (or ``None``) -> validated weights.
+
+    ``None`` (key absent) yields ``None``: every agent starts at template
+    step 0. An empty mapping is the same as the key absent. Either key may
+    be omitted only if the other is 1.0 (it then defaults to 0.0).
+    """
+    if spec is None:
+        return None
+    if not isinstance(spec, Mapping):
+        raise ComponentError(
+            f"{what}: must be a mapping with 'llm'/'db' weights, got {spec!r}"
+        )
+    unknown = [k for k in spec.keys() if k not in _INITIAL_STEP_KINDS]
+    if unknown:
+        raise ComponentError(
+            f"{what}: unknown key(s) {', '.join(str(k) for k in unknown)}; "
+            f"only 'llm' and 'db' are allowed"
+        )
+    present = {k: spec[k] for k in ("llm", "db") if k in spec}
+    if not present:
+        return None  # both missing == the key absent
+    weights: Dict[str, float] = {}
+    for key, value in present.items():
+        w = _finite(value, what, key)
+        if w < 0:
+            raise ComponentError(f"{what}: {key!r} weight must be >= 0, got {w}")
+        weights[key] = w
+    total = sum(weights.values())
+    if abs(total - 1.0) > 1e-9:
+        raise ComponentError(
+            f"{what}: weights must sum to 1 (tolerance 1e-9), "
+            f"got sum={total} from {present}"
+        )
+    return InitialStepWeights(llm=weights.get("llm", 0.0), db=weights.get("db", 0.0))
+
+
+# --------------------------------------------------------------------------- #
 # AgentClient component                                                       #
 # --------------------------------------------------------------------------- #
 
@@ -509,7 +583,9 @@ class _AgentWorker:
     tokens_rng: random.Random
     profile_rng: random.Random
     workflow_rng: random.Random  # draws the template once, at construct
-    boxes: Dict[str, IngressNone]
+    initial_step: str = "llm"  # first-request kind ('llm'|'db'), drawn at construct
+    start_index: int = 0  # template index the closed loop starts at
+    boxes: Dict[str, IngressNone] = field(default_factory=dict)
     seq: Any = None  # itertools.count incremented lazily in start()
     counters: Dict[str, int] = field(
         default_factory=lambda: {
@@ -548,6 +624,7 @@ class AgentClient(Component):
         self._output_gen: Optional[TokenGenerator] = None
         self._mix: Optional[ProfileMix] = None
         self._workflow: Optional[WorkflowMix] = None
+        self._initial_step: Optional[InitialStepWeights] = None
 
     # ------------------------------------------------------------------ #
     # wiring helpers (called between construct and elaborate)             #
@@ -642,6 +719,18 @@ class AgentClient(Component):
         """
         return tuple(w.template.name for w in self._workers)
 
+    @property
+    def agent_initial_steps(self) -> Tuple[str, ...]:
+        """The first-request kind per agent (``'llm'``|``'db'``, in
+        construction order).
+
+        Drawn once per agent at construct time, from the named
+        ``initial_step`` RNG stream. Without an ``initial_step:`` config
+        this is the kind of the template's step 0 (``'llm'`` for an
+        ``inference`` step, ``'db'`` otherwise).
+        """
+        return tuple(w.initial_step for w in self._workers)
+
     # ------------------------------------------------------------------ #
     # lifecycle                                                           #
     # ------------------------------------------------------------------ #
@@ -656,6 +745,31 @@ class AgentClient(Component):
             # the token/profile streams (separate named child stream)
             workflow_rng = random.Random(f"{seed}/{agent_id}/workflow")
             template = self._workflow.draw(workflow_rng)  # type: ignore[union-attr]
+            # the first-request kind draw is likewise a separate named child
+            # stream (independent of workflow/tokens/queries); it selects the
+            # STARTING INDEX of the template so the first submit lands at t=0
+            if self._initial_step is None:
+                initial_step = "llm" if template.steps[0] == "inference" else "db"
+                start_index = 0
+            else:
+                initial_step_rng = random.Random(f"{seed}/{agent_id}/initial_step")
+                initial_step = (
+                    "llm"
+                    if initial_step_rng.random() < self._initial_step.llm
+                    else "db"
+                )
+                step_kind = _INITIAL_STEP_KINDS[initial_step]
+                matches = [
+                    i for i, step in enumerate(template.steps) if step == step_kind
+                ]
+                if not matches:
+                    raise ComponentError(
+                        f"{self.full_path}: agent {agent_id!r} initial_step is "
+                        f"{initial_step!r} but workflow template {template.name!r} "
+                        f"has no '{step_kind}' step "
+                        f"(steps: {', '.join(template.steps)})"
+                    )
+                start_index = matches[0]
             boxes = {
                 port: IngressNone(env, name=f"{agent_id}.{port}", sink=_NO_INGRESS_PROBE)
                 for port in _RX_PORTS
@@ -667,6 +781,8 @@ class AgentClient(Component):
                 tokens_rng=random.Random(f"{seed}/{agent_id}/tokens"),
                 profile_rng=random.Random(f"{seed}/{agent_id}/queries"),
                 workflow_rng=workflow_rng,
+                initial_step=initial_step,
+                start_index=start_index,
                 boxes=boxes,
             )
             self._workers.append(worker)
@@ -724,6 +840,13 @@ class AgentClient(Component):
         if "workflow" in section:
             workflow_spec = section["workflow"]
         self._workflow = parse_workflow(workflow_spec, what=f"{what} workflow")
+        # optional; None (key absent) = every agent starts at template step 0
+        initial_step_spec = None
+        if "initial_step" in section:
+            initial_step_spec = section["initial_step"]
+        self._initial_step = parse_initial_step(
+            initial_step_spec, what=f"{what} initial_step"
+        )
 
     def _closed_loop(self, worker: _AgentWorker) -> Any:
         """One agent's template-driven loop; runs until the sim ends.
@@ -735,7 +858,7 @@ class AgentClient(Component):
         """
         steps = worker.template.steps
         n_steps = len(steps)
-        step_pos = 0
+        step_pos = worker.start_index  # first submit at t=0 from this step on
         last_inference_id: Optional[str] = None
         template_name = worker.template.name
         while True:
@@ -755,6 +878,7 @@ class AgentClient(Component):
                         "output_tokens": int(output_tokens),
                         "workflow_template": template_name,
                         "workflow_step": step_pos % n_steps,
+                        "initial_step": worker.initial_step,
                     },
                     tokens=float(int(input_tokens) + int(output_tokens)),
                 )
@@ -788,6 +912,7 @@ class AgentClient(Component):
                         "profile": profile.name,
                         "workflow_template": template_name,
                         "workflow_step": step_pos % n_steps,
+                        "initial_step": worker.initial_step,
                     },
                     tokens=0.0,  # DB volume is bandwidth, not LLM tokens
                 )
@@ -826,6 +951,7 @@ class AgentClient(Component):
             state=state,
             workflow_template=worker.template.name,
             workflow_step=step,
+            initial_step=worker.initial_step,
         )
 
 

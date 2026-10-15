@@ -759,6 +759,25 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* EXPORT: header button — visible for the current live run (and      */
+  /* after DONE). Plain anchor to GET /live/export?run_id=…; the server  */
+  /* sets Content-Disposition: attachment, so the click just downloads.  */
+  /* Zips whatever exists at click time: safe even mid-run (metrics.db   */
+  /* is snapshotted server-side through sqlite's online-backup API).     */
+  /* ------------------------------------------------------------------ */
+  var EXPORT_BASE = "/live/export?run_id=";
+  function setExport(runId) {
+    var b = $("export");
+    if (!runId) {
+      if (!b.classList.contains("hidden")) b.classList.add("hidden");
+      return;
+    }
+    var href = EXPORT_BASE + encodeURIComponent(runId);
+    if (b.getAttribute("href") !== href) b.setAttribute("href", href);
+    b.classList.remove("hidden");
+  }
+
+  /* ------------------------------------------------------------------ */
   /* SSE                                                                 */
   /* ------------------------------------------------------------------ */
   var es = null;
@@ -782,6 +801,7 @@
     // every init (fresh connect, run switch, EventSource reconnect replays
     // from row 0) reseats the scene from *this* run's resolved config
     S.runId = d.run_id; S.until = d.until || 0; S.status = d.status || "running";
+    setExport(d.run_id);
     resetPlayback();
     M = buildModel(d.config);
     renderScene();
@@ -855,7 +875,9 @@
     f.classList.remove("hidden");
     f.innerHTML = "run <b>" + d.run_id + "</b> complete · t=" +
       Number(d.t_max || 0).toFixed(2) + "<br><a href='" + d.report +
-      "'>open report</a> · <a href='" + d.vcd + "'>raw VCD</a>";
+      "'>open report</a> · <a href='" + d.vcd + "'>raw VCD</a> · " +
+      "<a href='" + EXPORT_BASE + encodeURIComponent(d.run_id) +
+      "' download>⬇ export zip</a>";
   }
 
   /* ------------------------------------------------------------------ */
@@ -888,11 +910,13 @@
         if (!es && !S.runId) setPill("idle");
         if (es === null && S.runId) {   // server restarted: its slot is gone —
           S.runId = null;               // never leave a stale run blocking the UI
+          setExport(null);
           setLaunch("idle", "server idle — launch a run");
         }
         return;
       }
       if (st.run_id !== S.runId) {   // form-OR-API-launched new run: re-adopt
+        setExport(st.run_id);        // EXPORT follows the server-current run
         if (es) { es.close(); es = null; }
         connectStream();
         return;

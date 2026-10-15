@@ -16,16 +16,19 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import shutil
 import sqlite3
+import tempfile
 import time
+import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from omegaconf import OmegaConf
 
-__all__ = ["LiveManager", "LiveBusy", "LiveError", "SamplesTail"]
+__all__ = ["LiveManager", "LiveBusy", "LiveError", "SamplesTail", "zip_run_dir"]
 
 #: form-reachable config keys (dotted OmegaConf paths) with coercion
 OVERRIDABLE: Dict[str, str] = {
@@ -443,3 +446,76 @@ def _display_cfg(cfg: Any) -> Dict[str, Any]:
             "network": network,
         },
     }
+
+
+# --------------------------------------------------------------------- #
+# run-directory export (the /live EXPORT button)                        #
+# --------------------------------------------------------------------- #
+
+#: name of the metrics database inside a run dir (same file the tailer reads)
+METRICS_DB_NAME = "metrics.db"
+
+
+def _snapshot_metrics_db(src: Path, dest_dir: Path) -> Optional[Path]:
+    """A transactionally consistent copy of a live ``metrics.db``.
+
+    The run process commits batched writes to metrics.db while it runs, so
+    a plain file copy can catch a half-written page and the archived
+    database could open torn. ``sqlite3``'s online-backup API reads through
+    the locking protocol instead and always yields a queryable snapshot —
+    that is the chosen safe path for exporting mid-run. Returns the
+    snapshot path, or ``None`` when the db could not be backed up (missing,
+    locked past the timeout, not a SQLite file); the caller then falls back
+    to a raw byte copy.
+    """
+    dest = dest_dir / METRICS_DB_NAME
+    try:
+        src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=5.0)
+        try:
+            dst_conn = sqlite3.connect(str(dest))
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
+        finally:
+            src_conn.close()
+    except sqlite3.Error:
+        dest.unlink(missing_ok=True)
+        return None
+    return dest
+
+
+def zip_run_dir(run_dir: Path, archive: Path) -> List[str]:
+    """Pack a run directory into the zip file at ``archive``; list members.
+
+    Walks the whole run dir — every file therein is archived (config.yaml,
+    metrics.db, run.vcd, report.html, summary.json, the live_request /
+    live_result markers, anything a future pipeline adds), paths relative
+    to the run dir. ``metrics.db`` goes through the sqlite online-backup
+    API (see :func:`_snapshot_metrics_db`) so an export DURING a live run
+    cannot tear the database; if the backup is impossible the raw bytes are
+    archived instead (documented fallback: the zip stays valid, the db copy
+    may lag one commit).
+    """
+    run_dir = Path(run_dir)
+    archive = Path(archive)
+    names: List[str] = []
+    staging = Path(tempfile.mkdtemp(prefix="agent-db-sim-export-"))
+    try:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(run_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(run_dir).as_posix()
+                if path.name == METRICS_DB_NAME and path.parent == run_dir:
+                    snap = _snapshot_metrics_db(path, staging)
+                    if snap is not None:
+                        zf.write(snap, rel)
+                        snap.unlink(missing_ok=True)
+                        names.append(rel)
+                        continue
+                zf.write(path, rel)
+                names.append(rel)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return names

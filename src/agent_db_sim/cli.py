@@ -2,7 +2,9 @@
 
 Usage: ``agent-db-sim run scenarios/topology_compare.yaml [--out runs]``
        ``agent-db-sim sweep scenarios/topology_compare.yaml [--out runs]``
-       ``agent-db-sim serve <run-dir> [--port]``   (viz server)
+       ``agent-db-sim serve [run-dir] [--port]``    (viz server; run-dir
+           optional — ``serve`` starts on an empty dir so ``/live`` works
+           without a prior run)
        ``agent-db-sim render <run-dir> [--name]``  (standalone report HTML)
        ``agent-db-sim analyze <run-dir>``          (analytical cross-check)
 """
@@ -24,6 +26,7 @@ app = typer.Typer(
 )
 
 DEFAULT_VIZ_PORT = 8060
+DEFAULT_VIZ_RUN_DIR = "runs/live"
 DEFAULT_OUT = "runs"
 
 
@@ -258,22 +261,29 @@ def sweep(
         )
         raise typer.Exit(code=1)
 
-def _require_viz_run(run_dir: Path) -> None:
+def _viz_artifact_note(run_dir: Path) -> str:
+    """Startup-echo suffix for a served dir that holds no completed run yet.
+
+    A warning line only — never a gate: the server binds anyway, ``/live``
+    stays fully functional (launch form + streaming), and the artifact
+    routes (``/``, ``/vcd``, ``/signals``, ``/reports/<name>``) degrade to
+    friendly inline messages on their own.
+    """
     import agent_db_sim.viz.server as viz_server
-    if not (run_dir / viz_server.VCD_NAME).exists():
-        typer.secho(
-            f"error: {run_dir} has no {viz_server.VCD_NAME} "
-            "(run a scenario/sweep first, or check the run directory)",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=2)
+    if (run_dir / viz_server.VCD_NAME).exists():
+        return ""
+    return f" — no {viz_server.VCD_NAME} yet, /live available"
+
 
 @app.command()
 def serve(
-    run_dir: Path = typer.Argument(
-        ..., exists=True, file_okay=False, readable=True,
-        help="Run directory (with run.vcd [+ metrics.db]) to serve.",
+    run_dir: Optional[Path] = typer.Argument(
+        None, file_okay=False, readable=True,
+        help=(
+            "Run directory to serve (run.vcd [+ metrics.db]). Optional: "
+            f"defaults to {DEFAULT_VIZ_RUN_DIR}, created when missing, so "
+            "/live works even before the first run."
+        ),
     ),
     port: int = typer.Option(
         DEFAULT_VIZ_PORT, "--port", "-p",
@@ -284,12 +294,22 @@ def serve(
         help="Host interface to bind.",
     ),
 ) -> None:
-    """Serve a completed (or still-running) run: waveforms + reports."""
+    """Serve a completed (or still-running) run: waveforms + reports.
+
+    No completed run is required: launched against a fresh/empty directory
+    the server still binds and ``/live`` works end to end; artifact routes
+    show a friendly "no artifacts yet" message until a run lands.
+    """
     import uvicorn
 
-    _require_viz_run(run_dir)
+    run_dir = Path(run_dir) if run_dir is not None else Path(DEFAULT_VIZ_RUN_DIR)
+    run_dir.mkdir(parents=True, exist_ok=True)
     from agent_db_sim.viz.server import create_app
-    typer.echo(f"viz server: http://{host}:{port}/  ({run_dir})")
+
+    typer.echo(
+        f"viz server: http://{host}:{port}/  "
+        f"({run_dir}{_viz_artifact_note(run_dir)})"
+    )
     uvicorn.run(create_app(run_dir), host=host, port=port, log_level="info")
 
 @app.command()

@@ -1,12 +1,16 @@
 """Visualization server (ticket 01 serving approach): FastAPI + uvicorn.
 
-- ``GET /``             HTML shell embedding d3-wave (locally vendored JS)
+- ``GET /``             HTML shell embedding d3-wave (locally vendored JS);
+                        a friendly inline page when the dir has no ``run.vcd``
 - ``GET /signals``      signal catalog JSON parsed from the run's VCD
+                        (empty catalog + hint when the VCD is missing)
 - ``GET /stream``       SSE: ``init`` snapshot, then ~1 Hz ``delta`` events
                         while the run is live, ``done`` when it finishes
-- ``GET /vcd``          the raw VCD file (Surfer deep-dive link, post-run)
+- ``GET /vcd``          the raw VCD file (Surfer deep-dive link, post-run);
+                        a friendly inline page when the VCD is missing
 - ``GET /reports``      auto-indexed report templates
-- ``GET /reports/<k>``  rendered report from metrics.db (Jinja2 + Plotly)
+- ``GET /reports/<k>``  rendered report from metrics.db (Jinja2 + Plotly);
+                        a friendly inline page when metrics.db is missing
 - ``GET /sweeps``       list sweep roots found under ``sweeps_root`` (JSON)
 - ``GET /sweeps/<s>``   sweep-comparison report over that sweep root
                         (default template ``sweep_compare``)
@@ -17,7 +21,14 @@
 - ``GET /live/state``   live-run slot status (JSON)
 - ``GET /live/stream``  SSE: live ``metrics.db`` sample rows -> ``delta`` events
                          (~2 Hz tail poll so the HUD advances every second)
+- ``GET /live/export``  zip of a live run dir (current run by default);
+                        metrics.db is snapshotted via the sqlite backup API,
+                        so clicking EXPORT mid-run is safe
 - ``GET /live/run/<id>/report`` / ``.../vcd``  artifacts of a finished live run
+
+The server binds against a run dir that has no artifacts at all (fresh
+``runs/live``): ``/live`` stays fully functional, and the artifact-dependent
+routes above degrade to friendly inline messages instead of tracebacks.
 
 SSE tail discipline per ticket 01: the server holds back the newest
 ``#timestamp`` block (it may still be mid-write); clients only ever see
@@ -28,6 +39,9 @@ catalog/sample data derived from complete blocks. A finished run emits
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -36,12 +50,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 
 from agent_db_sim.viz.live import (
     LiveBusy,
     LiveError,
     LiveManager,
     SamplesTail,
+    zip_run_dir,
 )
 from agent_db_sim.viz.report import (
     render_report,
@@ -52,7 +68,14 @@ from agent_db_sim.viz.report import (
 )
 from agent_db_sim.viz.vcd import QUANTA, VcdTailer, parse_vcd_bytes
 
-__all__ = ["create_app", "sse_events", "live_sse_events", "VCD_NAME", "METRICS_NAME"]
+__all__ = [
+    "create_app",
+    "sse_events",
+    "live_sse_events",
+    "placeholder_page",
+    "VCD_NAME",
+    "METRICS_NAME",
+]
 
 VCD_NAME = "run.vcd"
 METRICS_NAME = "metrics.db"
@@ -70,6 +93,54 @@ MAX_IDLE_POLLS = None
 
 def _sse(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+def missing_artifact_message(artifact: str, run_dir: Path) -> str:
+    """The single source of truth for the degraded-routes hint."""
+    return (
+        f"this run dir has no {artifact} yet — launch a live run on /live "
+        f"({run_dir})"
+    )
+
+
+def placeholder_page(title: str, artifact: str, run_dir: Path,
+                     status_code: int = 200) -> Response:
+    """Friendly inline HTML for artifact routes served against an empty dir.
+
+    A completed run is NOT a requirement to start ``serve``: until the run
+    dir holds ``run.vcd`` / ``metrics.db`` these routes show this page (with
+    a link to the fully functional ``/live`` launch view) instead of a
+    traceback or a bare JSON 404.
+    """
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>agent-db-sim — {title}</title>
+  <style>
+    body {{ background:#0b0e13; color:#d7e2ef; margin:0; min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; }}
+    main {{ max-width:38rem; padding:2.5rem 1.5rem; text-align:center; }}
+    h1 {{ font-size:1rem; letter-spacing:.16em; text-transform:uppercase;
+      color:#7d8ca1; font-weight:600; }}
+    h1 em {{ color:#3fd68f; font-style:normal; }}
+    p {{ line-height:1.7; font-size:.92rem; }}
+    .art {{ color:#ffb454; }}
+    a {{ color:#3fd68f; }}
+    .dir {{ color:#46566e; font-size:.75rem; letter-spacing:.08em; }}
+  </style>
+</head>
+<body><main>
+  <h1>agent-db-sim <em>{title}</em></h1>
+  <p>this run dir has no <span class="art">{artifact}</span> yet —
+     <a href="/live">launch a live run on <b>/live</b></a>
+     and its artifacts will show up here.</p>
+  <p class="dir">{run_dir}</p>
+</main></body>
+</html>"""
+    return Response(html, status_code=status_code, media_type="text/html")
 
 
 def create_app(
@@ -128,7 +199,8 @@ def create_app(
     @app.get("/")
     def home(request: Request):
         if not vcd_path.exists():
-            raise _not_found(f"no {VCD_NAME} under {run_dir}")
+            # no completed run yet: friendly inline page, /live is the CTA
+            return placeholder_page("waveforms", VCD_NAME, run_dir)
         surfer_url: Optional[str] = None
         try:
             vcd_url = str(request.url_for("get_vcd"))
@@ -148,7 +220,13 @@ def create_app(
     @app.get("/signals")
     def signal_catalog() -> JSONResponse:
         if not vcd_path.exists():
-            raise _not_found(f"no {VCD_NAME} under {run_dir}")
+            return JSONResponse(
+                {
+                    "signals": [],
+                    "t_max": None,
+                    "detail": missing_artifact_message(VCD_NAME, run_dir),
+                }
+            )
         snap = _snapshot()
         return JSONResponse({"signals": snap["signals"], "t_max": snap["t_max"]})
 
@@ -167,9 +245,10 @@ def create_app(
         )
 
     @app.get("/vcd", name="get_vcd")
-    def get_vcd() -> FileResponse:
+    def get_vcd():
         if not vcd_path.exists():
-            raise _not_found(f"no {VCD_NAME} under {run_dir}")
+            return placeholder_page("raw VCD", VCD_NAME, run_dir,
+                                    status_code=404)
         return FileResponse(
             vcd_path,
             media_type="application/octet-stream",
@@ -191,9 +270,16 @@ def create_app(
             pass
         try:
             html = render_report(run_dir, name=name, standalone=False, extra_context=extra)
-        except (FileNotFoundError, ValueError) as exc:
-            # FileNotFoundError: unknown template; ValueError: e.g. a sweep-only
-            # template was requested against a single run (404 + guidance).
+        except (FileNotFoundError, sqlite3.Error) as exc:
+            if METRICS_NAME in str(exc) or isinstance(exc, sqlite3.Error):
+                # metrics.db missing (or not populated yet): a run dir can be
+                # served before any run lands, so degrade instead of raising.
+                return placeholder_page("report", METRICS_NAME, run_dir,
+                                        status_code=404)
+            # FileNotFoundError: unknown template (404 + guidance).
+            raise _not_found(str(exc)) from exc
+        except ValueError as exc:
+            # a sweep-only template was requested against a single run
             raise _not_found(str(exc)) from exc
         return Response(html, media_type="text/html")
 
@@ -314,6 +400,42 @@ def create_app(
             raise _not_found(f"no {VCD_NAME} for live run {run_id!r} yet")
         return FileResponse(
             vcd, media_type="application/octet-stream", filename=vcd.name
+        )
+
+    @app.get("/live/export")
+    def live_export(run_id: Optional[str] = None) -> Response:
+        """Download one live run dir as a zip (the /live EXPORT button).
+
+        ``run_id`` defaults to the server's current (most recent) live run.
+        Everything in the run dir is archived — config.yaml, metrics.db,
+        run.vcd, report.html, summary.json, the request/result markers.
+        Safe WHILE the run is still executing: ``zip_run_dir`` snapshots
+        metrics.db through sqlite3's online-backup API, so the archive can
+        never carry a torn database. The zip is built into a temp file and
+        removed by a background task once the response has been sent.
+        """
+        st = live.refresh() or {}
+        rid = run_id or st.get("run_id")
+        if not rid:
+            raise _not_found("nothing to export yet — launch a live run on /live")
+        directory = _live_run_dir(str(rid))
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"agent-db-sim-{rid}-", suffix=".zip"
+        )
+        os.close(fd)
+        archive = Path(tmp_name)
+        try:
+            zip_run_dir(directory, archive)
+        except OSError:  # pragma: no cover - disk-level failure
+            archive.unlink(missing_ok=True)
+            raise
+        return FileResponse(
+            archive,
+            media_type="application/zip",
+            # starlette sets Content-Disposition: attachment;
+            # filename="agent-db-sim-<run_id>.zip" from this filename kwarg
+            filename=f"agent-db-sim-{rid}.zip",
+            background=BackgroundTask(archive.unlink, missing_ok=True),
         )
 
     return app

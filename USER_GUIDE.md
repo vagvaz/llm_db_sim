@@ -282,7 +282,7 @@ Note that on `centralized` a `db.compute_nodes` factor is a documented no-op
 ```text
 agent-db-sim run <scenario.yaml> [--out DIR] [--profile NAME]
 agent-db-sim sweep <scenario.yaml> [--out DIR] [--profile NAME]
-agent-db-sim serve <run-dir> [--port N] [--host ADDR]
+agent-db-sim serve [run-dir] [--port N] [--host ADDR]
 agent-db-sim render <run-dir> [--name NAME] [--out PATH]
 ```
 
@@ -318,7 +318,12 @@ uv run agent-db-sim serve runs/topology_compare --port 8060
 ```
 
 Binds `http://127.0.0.1:<port>/` (port 8060 default, `--port`/`--host` to
-change). Routes:
+change). `run-dir` is **optional**: it defaults to `runs/live` (created when
+missing), and a completed run is *not* required to start serving — on an
+empty dir the startup line notes `no run.vcd yet, /live available`, `/live`
+is fully functional (launch form + streaming), and the artifact routes below
+show a friendly "launch a live run on /live" page/JSON instead of errors.
+Routes:
 
 | Route | What you get |
 |---|---|
@@ -354,7 +359,12 @@ animated live; a second concurrent launch is rejected (HTTP 409) until the
 first finishes. When it completes, the panel links to the run's rendered
 report (`/live/run/<id>/report` — the usual full pipeline lands in the run
 dir: `metrics.db`, `run.vcd`, `report.html`, `summary.json`) and its raw
-VCD. API-wise: `POST /live/run`, `GET /live/state`, `GET /live/scenarios`.
+VCD. The header's amber **EXPORT** button (and the DONE panel's zip link)
+downloads the whole run dir as a zip via `GET /live/export[?run_id=]`
+(default: the current/most recent run) — the button works mid-run too:
+`metrics.db` is snapshotted through sqlite's online-backup API, so the
+archive never carries a torn database. API-wise: `POST /live/run`,
+`GET /live/state`, `GET /live/scenarios`, `GET /live/export`.
 
 ### `render` — standalone report HTML
 

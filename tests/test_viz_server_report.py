@@ -238,6 +238,78 @@ def test_report_unknown_template_404(client) -> None:
 
 
 # --------------------------------------------------------------------- #
+# degraded routes: serve started on a FRESH dir with no artifacts        #
+# --------------------------------------------------------------------- #
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture()
+def empty_client(tmp_path: Path):
+    """The app served against an EMPTY run dir (no run.vcd, no metrics.db)."""
+    run_dir = tmp_path / "fresh-run"
+    run_dir.mkdir()
+    app = create_app(
+        run_dir,
+        live_root=str(tmp_path / "live"),
+        scenarios_root=str(REPO / "scenarios"),
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+def test_empty_dir_home_is_friendly_page(empty_client) -> None:
+    r = empty_client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "run.vcd" in r.text          # names the missing artifact
+    assert "/live" in r.text            # and points at the working launch view
+
+
+def test_empty_dir_vcd_degrades(empty_client) -> None:
+    r = empty_client.get("/vcd")
+    assert r.status_code == 404         # not found stays honest HTTP-wise …
+    assert "text/html" in r.headers["content-type"]
+    assert "run.vcd" in r.text and "launch a live run" in r.text
+
+
+def test_empty_dir_signals_degrade(empty_client) -> None:
+    body = empty_client.get("/signals").json()
+    assert body["signals"] == []
+    assert "run.vcd" in body["detail"] and "/live" in body["detail"]
+
+
+def test_empty_dir_report_degrades(empty_client) -> None:
+    r = empty_client.get("/reports/standard")
+    assert r.status_code == 404
+    assert "metrics.db" in r.text and "/live" in r.text
+    # the index itself needs no artifacts: templates are listed anyway
+    idx = empty_client.get("/reports")
+    assert idx.status_code == 200 and "standard" in idx.text
+
+
+def test_empty_dir_stream_is_sse_error_done(empty_client) -> None:
+    r = empty_client.get("/stream")
+    assert r.status_code == 200
+    assert "event: error" in r.text and "event: done" in r.text
+
+
+def test_empty_dir_live_fully_functional(empty_client) -> None:
+    assert empty_client.get("/live").status_code == 200
+    body = empty_client.get("/live/scenarios").json()
+    assert any(s["path"] == "sanity/sanity_single.yaml"
+               for s in body["scenarios"])
+    assert empty_client.get("/live/state").json() == {"status": "idle"}
+    # launching from the degraded dir works end to end
+    r = empty_client.post(
+        "/live/run",
+        json={"scenario": "sanity/sanity_single.yaml",
+              "overrides": {"sim.until": 12}},
+    )
+    assert r.status_code == 202
+
+
+# --------------------------------------------------------------------- #
 # CLI                                                                    #
 # --------------------------------------------------------------------- #
 
@@ -266,9 +338,58 @@ def test_render_cli_unknown_template_errors(fixture_run) -> None:
     assert result.exit_code == 2
 
 
-def test_serve_cli_requires_vcd(tmp_path: Path) -> None:
-    empty = tmp_path / "empty-run"
-    empty.mkdir()
-    result = runner.invoke(cli_app, ["serve", str(empty)])
-    assert result.exit_code == 2
-    assert "run.vcd" in result.output
+def test_serve_cli_requires_no_run(tmp_path: Path, monkeypatch) -> None:
+    """serve starts WITHOUT a completed run: binds anyway, warns in the echo.
+
+    Regression for the old hard-exit (code=2 on a dir without run.vcd): a
+    fresh/empty run dir must start the server, create the dir when missing,
+    and /live must come up fully functional.
+    """
+    import uvicorn
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        uvicorn, "run",
+        lambda app, **kw: seen.update(app=app, kw=kw),  # capture + return
+    )
+    empty = tmp_path / "empty-run"  # does NOT exist yet
+    result = runner.invoke(cli_app, ["serve", str(empty), "--port", "8123"])
+    assert result.exit_code == 0, result.output
+    assert empty.is_dir(), "serve must create a missing run dir"
+    assert "viz server" in result.output
+    assert "no run.vcd yet" in result.output and "/live available" in result.output
+    assert seen["kw"]["port"] == 8123
+
+    # the captured app serves: /live works, / degrades to a friendly page
+    client = TestClient(seen["app"])
+    assert client.get("/live").status_code == 200
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "run.vcd" in home.text and "/live" in home.text
+
+
+def test_serve_cli_default_run_dir(tmp_path: Path, monkeypatch) -> None:
+    """run-dir is optional: bare ``serve`` lands on runs/live (created)."""
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: None)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(cli_app, ["serve"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "runs" / "live").is_dir()
+    assert "runs/live" in result.output
+
+
+def test_serve_cli_full_run_echo_unchanged(
+    fixture_run, monkeypatch
+) -> None:
+    """Regression: serving a completed run echoes exactly as before."""
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: None)
+    result = runner.invoke(cli_app, ["serve", str(fixture_run.run_dir)])
+    assert result.exit_code == 0, result.output
+    assert f"viz server: http://127.0.0.1:8060/  ({fixture_run.run_dir})" in \
+        result.output
+    assert "no run.vcd" not in result.output
+

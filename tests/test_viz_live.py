@@ -7,15 +7,17 @@ and drives the whole live loop: POST -> stream -> done -> report artifacts.
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_db_sim.viz.live import LiveBusy, LiveManager, SamplesTail
+from agent_db_sim.viz.live import LiveBusy, LiveManager, SamplesTail, zip_run_dir
 from agent_db_sim.viz.server import create_app
 
 REPO = Path(__file__).resolve().parents[1]
@@ -478,3 +480,124 @@ def test_counter_rows_reach_db_at_tick_boundaries(tmp_path: Path) -> None:
     finally:
         tail.close()
         collector.abort()
+
+
+# --------------------------------------------------------------------- #
+# run-dir export (the /live EXPORT button)                               #
+# --------------------------------------------------------------------- #
+
+def _launch(client: TestClient, until: float = 12) -> str:
+    r = client.post(
+        "/live/run",
+        json={"scenario": "sanity/sanity_single.yaml",
+              "overrides": {"sim.until": until}},
+    )
+    assert r.status_code == 202
+    return r.json()["run_id"]
+
+
+def test_zip_run_dir_walks_dir_and_snapshots_metrics_db(tmp_path: Path) -> None:
+    run = tmp_path / "r"
+    (run / "nested").mkdir(parents=True)
+    (run / "config.yaml").write_text("sim:\n  until: 12\n")
+    (run / "nested" / "extra.txt").write_text("anything is archived")
+    conn = sqlite3.connect(run / "metrics.db")
+    conn.execute("CREATE TABLE samples (id INTEGER PRIMARY KEY, t REAL)")
+    conn.execute("INSERT INTO samples (t) VALUES (1.5)")
+    conn.commit()
+    conn.close()
+
+    archive = tmp_path / "out.zip"
+    names = zip_run_dir(run, archive)
+    assert set(names) == {"config.yaml", "metrics.db", "nested/extra.txt"}
+    with zipfile.ZipFile(archive) as zf:
+        assert zf.testzip() is None
+        assert b"anything is archived" in zf.read("nested/extra.txt")
+        out = tmp_path / "copy.db"
+        out.write_bytes(zf.read("metrics.db"))
+    conn = sqlite3.connect(out)
+    assert conn.execute("SELECT t FROM samples").fetchall() == [(1.5,)]
+    conn.close()
+
+
+def test_export_zip_after_done(tmp_path: Path) -> None:
+    """DONE state: the zip carries the full artifact set, db included."""
+    client = TestClient(_app(tmp_path))
+    run_id = _launch(client)
+    _wait_done(client)
+
+    r = client.get("/live/export", params={"run_id": run_id})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    cd = r.headers["content-disposition"]
+    assert cd.startswith("attachment;")
+    assert f"agent-db-sim-{run_id}.zip" in cd
+
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert zf.testzip() is None
+    names = set(zf.namelist())
+    assert {"config.yaml", "metrics.db", "run.vcd", "report.html",
+            "summary.json"} <= names
+    # the archived metrics.db opens and queries as a healthy SQLite copy
+    out = tmp_path / "extracted.db"
+    out.write_bytes(zf.read("metrics.db"))
+    conn = sqlite3.connect(out)
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] > 0
+    conn.close()
+
+
+def test_export_defaults_to_current_run(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path))
+    run_id = _launch(client, until=8)
+    _wait_done(client)
+    r = client.get("/live/export")   # no ?run_id= → the server-current run
+    assert r.status_code == 200
+    assert f"agent-db-sim-{run_id}.zip" in r.headers["content-disposition"]
+    assert zipfile.ZipFile(io.BytesIO(r.content)).testzip() is None
+
+
+def test_export_during_run_is_valid_zip(tmp_path: Path) -> None:
+    """EXPORT while the run is STILL executing: valid zip, consistent db."""
+    import time
+
+    client = TestClient(_app(tmp_path))
+    run_id = _launch(client, until=3000)   # ~2.5 s wall: an export window
+    assert client.get("/live/state").json()["status"] == "running"
+    live_db = tmp_path / "live" / run_id / "metrics.db"
+    t0 = time.time()                        # wait for the writer to land
+    while not live_db.exists():
+        assert time.time() - t0 < 10.0, "metrics.db never appeared"
+        time.sleep(0.05)
+
+    r = client.get("/live/export", params={"run_id": run_id})
+    assert r.status_code == 200
+    # the run really was mid-flight at click time (or barely finished): still
+    # a complete, readable archive either way
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert zf.testzip() is None
+    assert "metrics.db" in zf.namelist()
+    out = tmp_path / "mid.db"
+    out.write_bytes(zf.read("metrics.db"))
+    conn = sqlite3.connect(out)
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    # the backup API snapshot is queryable even with the writer in flight
+    conn.execute("SELECT COUNT(*) FROM samples").fetchone()
+    conn.close()
+    _wait_done(client)
+
+
+def test_export_before_any_run_404(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path))
+    r = client.get("/live/export")
+    assert r.status_code == 404
+    assert "/live" in r.json()["detail"]
+
+
+def test_export_unknown_and_traversal_run_ids(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path))
+    _launch(client, until=8)
+    _wait_done(client)
+    assert client.get("/live/export", params={"run_id": "nope"}).status_code == 404
+    esc = client.get("/live/export", params={"run_id": "../../etc"})
+    assert esc.status_code == 404

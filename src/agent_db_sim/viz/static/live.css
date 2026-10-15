@@ -79,6 +79,19 @@ nav.links a.here { color: var(--green); border-bottom-color: var(--green); }
   background: linear-gradient(90deg, var(--cyan), var(--green));
   transition: width .5s linear; }
 
+/* EXPORT button — header, next to the playback HUD; live while running + done */
+a.export {
+  font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+  text-decoration: none; white-space: nowrap;
+  color: var(--amber); border: 1px solid var(--amber); border-radius: 999px;
+  padding: .26rem .75rem;
+  box-shadow: 0 0 12px -4px var(--amber);
+  transition: background .15s ease, color .15s ease;
+}
+a.export:hover { background: var(--amber); color: #231204;
+  box-shadow: 0 0 16px -2px var(--amber); }
+a.export:active { transform: translateY(1px); }
+
 /* -- main grid ---------------------------------------------------------- */
 main.grid {
   display: grid; grid-template-columns: 320px 1fr; gap: 0; flex: 1;

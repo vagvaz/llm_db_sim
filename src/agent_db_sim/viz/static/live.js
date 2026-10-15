@@ -17,6 +17,12 @@
  * 3. A pill says which: ``live`` while the server run is running, ``replay``
  *    while catching up on an already-finished run, ``done``/``error`` at the
  *    end of playback.
+ * 4. Closed-loop waiting is labelled, never blank: the model emits the first
+ *    inference at t=0 and every later request the instant the previous
+ *    round-trip completes, so an agent "waiting" IS thinking/querying — the
+ *    agent badge shows exactly that with elapsed sim-time, the launch button
+ *    mirrors the server run state machine, and a d3-wave panel streams the
+ *    queue/occupancy level signals alongside the scene.
  */
 (function () {
   "use strict";
@@ -59,7 +65,7 @@
   var S = {
     speed: 1, queue: [], qi: 0, cursor: null, lastT: 0,
     streamDone: false, playing: false, error: null, runId: null, until: 0,
-    status: null,
+    status: null, launchMode: "idle",   // idle | sending | waiting | running | done | error
     // authoritative event totals + continuously-paced display values:
     // events bill a request's tokens at service start (input) / completion
     // (output); the view drains the pending pool at the configured aggregate
@@ -72,16 +78,36 @@
   var MAX_AGENTS = 10, MAX_SLOTS = 16, MAX_NODES = 4;
   var M = null, SC = null;
 
+  /* number formatting for the capability labels ---------------------- */
+  function fmtTok(x) { return Math.round(x).toLocaleString("en-US"); }
+  function fmtIops(x) {
+    if (x >= 1e6) return trimZero(x / 1e6) + "M";
+    if (x >= 1e3) return trimZero(x / 1e3) + "K";
+    return trimZero(x);
+  }
+  function trimZero(x) {
+    var s = (Math.round(x * 100) / 100).toFixed(2);
+    return s.replace(/0+$/, "").replace(/\.$/, "");
+  }
+
   /* ------------------------------------------------------------------ */
   /* topology model                                                      */
   /* ------------------------------------------------------------------ */
   function buildModel(cfg) {
+    var db = cfg.db || {};
     var m = {
       agentCount: cfg.agents.count,
-      llm: { name: "llm", slots: cfg.llm.slots, queue: 0, queueTarget: 0,
-        busy: 0, busyTarget: 0, requests: 0, served: 0, agents: [] },
-      db: { topology: cfg.db.topology, backend: cfg.db.backend,
-        compute: [], storage: [] },
+      llm: { name: "llm", slots: cfg.llm.slots, ingress: cfg.llm.ingress || "fifo",
+        queue: 0, queueTarget: 0, busy: 0, busyTarget: 0, requests: 0,
+        served: 0, agents: [] },
+      db: { topology: db.topology, backend: db.backend,
+        compute: [], storage: [],
+        nodes: db.compute_nodes || 1,
+        caps: {
+          compute: db.compute || { slots: 1 },
+          storage: db.storage || {},
+          network: db.network || null,
+        } },
       rates: { in: cfg.llm.input_tokens_per_s, out: cfg.llm.output_tokens_per_s },
     };
     var nComp = cfg.db.topology === "centralized" ? 1
@@ -176,37 +202,41 @@
 
     /* agents */
     var shown = Math.min(M.agentCount, MAX_AGENTS);
-    var ax = 46, ay = 100, aw = 116, ah = 40, agap = 14;
+    var ax = 46, ay = 100, aw = 150, ah = 46, agap = 12;
     var agG = el("g", {}, svg);
     txt(agG, "n-sub", ax, ay - 14, "agent pool · ×" + M.agentCount);
     for (var i = 0; i < shown; i++) {
       var y = ay + i * (ah + agap);
       var g = el("g", { class: "node agent" }, agG);
       var r = el("rect", { x: ax, y: y, width: aw, height: ah, rx: 8 }, g);
-      txt(g, "n-title", ax + 12, y + 25, "agent-" + i);
-      var dot = el("circle", { class: "state-dot", cx: ax + aw - 14, cy: y + ah / 2,
-        r: 5, fill: C.idle }, g);
+      txt(g, "n-title", ax + 11, y + 20, "agent-" + i);
+      var badge = txt(g, "n-badge", ax + 11, y + 37, "");
+      var dot = el("circle", { class: "state-dot", cx: ax + aw - 13,
+        cy: y + ah / 2, r: 5, fill: C.idle }, g);
       titleOf(g, "agent-" + i + " — closed-loop: inference then grounded db query");
-      M.llm.agents.push({ g: g, r: r, dot: dot, x: ax + aw, y: y + ah / 2 });
+      M.llm.agents.push({ g: g, r: r, dot: dot, badge: badge,
+        x: ax + aw, y: y + ah / 2, wait: null, flash: null });
     }
     if (M.agentCount > shown)
       txt(agG, "n-sub", ax, ay + shown * (ah + agap) + 4,
         "+" + (M.agentCount - shown) + " more (round-robin)");
 
     /* LLM endpoint */
-    var lx = 320, ly = 130, lw = 230, lh = 420;
+    var lx = 356, ly = 130, lw = 230, lh = 420;
     var lg = el("g", { class: "node" }, svg);
     el("rect", { x: lx, y: ly, width: lw, height: lh, rx: 12, fill: "#16202e",
       stroke: "#232c3b" }, lg);
     txt(lg, "n-title", lx + 14, ly + 28, "llm.server");
-    txt(lg, "n-sub", lx + 14, ly + 46, "in " + Math.round(M.rates.in) +
-      " · out " + Math.round(M.rates.out) + " tok/s");
-    M.llm.cyl = cylinder(lg, lx + 26, ly + 72, 62, 170, "ingress");
+    txt(lg, "n-sub", lx + 14, ly + 46, "cap · in " + fmtTok(M.rates.in) +
+      " · out " + fmtTok(M.rates.out) + " tok/s");
+    txt(lg, "n-sub", lx + 14, ly + 60, M.llm.slots + " slot" +
+      (M.llm.slots === 1 ? "" : "s") + " · " + M.llm.ingress + " ingress");
+    M.llm.cyl = cylinder(lg, lx + 26, ly + 76, 62, 164, "ingress");
     var nb = Math.min(M.llm.slots, MAX_SLOTS);
-    txt(lg, "n-sub", lx + 108, ly + 90, "slots · " + M.llm.slots +
+    txt(lg, "n-sub", lx + 108, ly + 92, "slots busy · " + M.llm.slots +
       (M.llm.slots > nb ? " (" + nb + " shown)" : ""));
-    M.llm.bars = slotRow(lg, lx + 108, ly + 100, nb,
-      clamp(Math.floor(110 / nb), 6, 22), 4, 140);
+    M.llm.bars = slotRow(lg, lx + 108, ly + 102, nb,
+      clamp(Math.floor(110 / nb), 6, 22), 4, 138);
     M.llm.counterTxt = txt(lg, "n-val", lx + 14, ly + lh - 44, "in 0 · out 0",
       "start", "hud-tokens");
     M.llm.flowTxt = txt(lg, "n-val", lx + 14, ly + lh - 22, "req 0 · served 0",
@@ -214,11 +244,19 @@
 
     /* DB endpoint shell */
     var dbX = 640, dbY = 70, dbW = 634, dbH = 590;
+    var net = M.db.caps.network || null;
+    var cSlots = M.db.caps.compute.slots || 1;
+    var head = "db endpoint · " + M.db.topology + " · " +
+      M.db.compute.length + " compute node" + (M.db.compute.length === 1 ? "" : "s") +
+      " × " + cSlots + " slot" + (cSlots === 1 ? "" : "s") +
+      (net && M.db.topology !== "centralized" ?
+        " · net " + trimZero(net.bandwidth) + " GB/s · pool " +
+        (net.connections > 0 ? net.connections : "∞") +
+        " · lat " + trimZero(net.latency) : " · no internal net");
     var dbg = el("g", {}, svg);
     el("rect", { x: dbX, y: dbY, width: dbW, height: dbH, rx: 16, fill: "none",
       stroke: "#1b2534", "stroke-dasharray": "3 7" }, dbg);
-    txt(dbg, "n-sub", dbX + 14, dbY + 24, "db endpoint · " + M.db.topology +
-      " · backend " + M.db.backend);
+    txt(dbg, "n-sub", dbX + 14, dbY + 24, head);
 
     var cw = M.db.compute.length === 1 ? 190 : 128, ch = 250;
     var cx0 = dbX + 36, cy0 = dbY + 56;
@@ -230,29 +268,42 @@
       el("rect", { x: c.x, y: c.y, width: cw, height: ch, rx: 10, fill: "#151d2a",
         stroke: "#232c3b" }, g);
       txt(g, "n-title", c.x + 12, c.y + 26, c.name);
+      txt(g, "n-sub", c.x + cw - 12, c.y + 26, "×" + cSlots + " slots", "end");
       c.cyl = cylinder(g, c.x + 16, c.y + 44, 50, 130, "ingress");
       var ns = Math.min(6, MAX_SLOTS);
       txt(g, "n-sub", c.x + 82, c.y + 56, "compute slots");
       c.bars = slotRow(g, c.x + 82, c.y + 66, ns, Math.max(6, (cw - 100) / ns - 4), 4, 108);
       c.servedTxt = txt(g, "n-val", c.x + 12, c.y + ch - 12, "served 0");
-      titleOf(g, c.name + " — db query compute node");
+      titleOf(g, c.name + " — db query compute node · " + cSlots +
+        " slots · " + (M.db.caps.compute.ingress || "fifo") + " ingress · issue ratio " +
+        trimZero(M.db.caps.compute.issue_ratio || 0.1) + " · " +
+        (M.db.caps.compute.phase_split || "three_phase"));
     });
 
     var sw = M.db.storage.length === 1 ? 190 : 128, sh = 230;
     var sy0 = cy0 + ch + 90;
     var sstep = M.db.storage.length > 1
       ? (dbW - 72 - sw) / (M.db.storage.length - 1) : 0;
+    var sp = M.db.caps.storage || {};
+    var capTxt = (sp.iops_ceiling !== undefined ?
+      fmtIops(sp.iops_ceiling) + " ops/s · " + trimZero(sp.bandwidth_ceiling) + " GB/s" :
+      "backend " + M.db.backend);
     M.db.storage.forEach(function (s, j) {
       s.x = dbX + 36 + j * sstep; s.y = sy0;
       var g = el("g", { class: "node" }, dbg);
       el("rect", { x: s.x, y: s.y, width: sw, height: sh, rx: 10, fill: "#151d2a",
         stroke: "#232c3b" }, g);
       txt(g, "n-title", s.x + 12, s.y + 26, s.name);
+      txt(g, "n-sub", s.x + sw - 12, s.y + 26, M.db.backend, "end");
       s.cyl = cylinder(g, s.x + 16, s.y + 44, 50, 120, M.db.backend + " queue");
       txt(g, "n-sub", s.x + 82, s.y + 56, "service");
       s.bars = slotRow(g, s.x + 82, s.y + 66, 4, Math.max(6, (sw - 100) / 4 - 4), 4, 98);
+      txt(g, "n-sub", s.x + 12, s.y + sh - 28, capTxt);
       s.busyTxt = txt(g, "n-val", s.x + 12, s.y + sh - 12, "idle");
-      titleOf(g, s.name + " — " + M.db.backend + " storage node");
+      titleOf(g, s.name + " — " + M.db.backend + " storage node · " +
+        (sp.base_latency !== undefined ? "base lat " + sp.base_latency +
+          " · per-GB " + sp.per_gb_time + " · " : "") + capTxt +
+        " (shared across in-flight ops)");
     });
 
     /* links */
@@ -283,9 +334,15 @@
       (lx + lw + dbX) / 2 - 40, ly - 50);
     M.db.compute.forEach(function (c, i) {
       M.db.storage.forEach(function (s, j) {
+        var midX = (c.x + cw / 2 - 20 + s.x + sw / 2 - 20) / 2;
+        var midY = (c.y + ch + s.y) / 2;
+        // all links share one net config — label the first, hint the rest
+        var lbl = (net && M.db.topology !== "centralized" && i === 0 && j === 0)
+          ? "net " + trimZero(net.bandwidth) + " GB/s · pool " +
+            (net.connections > 0 ? net.connections : "∞") : null;
         link("link-" + i + "-" + j,
           curve(c.x + cw / 2 - 20, c.y + ch, s.x + sw / 2 - 20, s.y),
-          null, 0, 0);
+          lbl, lbl ? midX : 0, lbl ? midY - 4 : 0);
       });
     });
     SC.dotsLayer = el("g", {}, svg);
@@ -328,6 +385,11 @@
     var comp = kind === "edge" ? segs.slice(0, -1).join(".") : (tags.component || "");
 
     if (kind === "level") {
+      var wvNum = Number(value) || 0;
+      if (leaf === "queue_depth" || leaf === "slot_busy" ||
+          leaf === "conn_busy" || leaf === "level") {
+        waveAdd(waveLabel(comp, leaf), row[0], wvNum);
+      }
       if (leaf === "conn_busy" || leaf === "level") {
         var lm = comp.match(/link-(\d+)-(\d+)/);
         if (lm && SC && SC.links) {
@@ -374,15 +436,22 @@
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* agent states: the closed loop means an agent is NEVER idle while    */
+  /* its request is in flight — it is WAITING (thinking: inference       */
+  /* response pending; querying: db response pending). The badge labels  */
+  /* that wait with live elapsed sim-time so the loop reads as work.     */
+  /* ------------------------------------------------------------------ */
   function handleStage(stage, state, agentIdx, key) {
     var ag = agentIdx !== null
       ? M.llm.agents[agentIdx % M.llm.agents.length] : null;
+    var now = S.cursor === null ? 0 : S.cursor;
     if (stage === "inference" && ag) {
-      if (state === "submitted") { spawnDot("ag-llm", C.transfer); setAgent(ag, C.transfer); }
-      else if (state === "received") { spawnDot("llm-ag", C.completed); setAgent(ag, C.completed); }
+      if (state === "submitted") { spawnDot("ag-llm", C.transfer); ag.wait = { kind: "llm", t0: now }; ag.flash = null; }
+      else if (state === "received") { spawnDot("llm-ag", C.completed); ag.wait = null; ag.flash = { text: "✓ llm", until: now + 0.8 }; }
     } else if (stage === "db" && ag) {
-      if (state === "submitted") { spawnDot("ag-db", C.processing); setAgent(ag, C.processing); }
-      else if (state === "received") { spawnDot("db-ag", C.completed); setAgent(ag, C.completed); }
+      if (state === "submitted") { spawnDot("ag-db", C.processing); ag.wait = { kind: "db", t0: now }; ag.flash = null; }
+      else if (state === "received") { spawnDot("db-ag", C.completed); ag.wait = null; ag.flash = { text: "✓ db", until: now + 0.8 }; }
     } else if (stage === "compute_issue" && state === "completed" &&
                key.kind === "compute" && M.db.compute.length) {
       var c = M.db.compute[key.idx % M.db.compute.length];
@@ -391,13 +460,132 @@
     }
   }
 
-  function setAgent(ag, color) {
-    ag.dot.setAttribute("fill", color);
-    ag.r.setAttribute("stroke", color);
-    clearTimeout(ag._to);
-    ag._to = setTimeout(function () {
-      ag.dot.setAttribute("fill", C.idle); ag.r.removeAttribute("stroke");
-    }, 1400);
+  function paintAgents() {
+    var now = S.cursor === null ? 0 : S.cursor;
+    for (var i = 0; i < M.llm.agents.length; i++) {
+      var ag = M.llm.agents[i];
+      var color = C.idle, label = "", lcolor = "#5b6b81";
+      if (ag.wait) {
+        var secs = Math.max(0, now - ag.wait.t0);
+        if (ag.wait.kind === "llm") { color = C.transfer; label = "thinking · " + secs.toFixed(1) + "s"; }
+        else { color = C.processing; label = "querying · " + secs.toFixed(1) + "s"; }
+        lcolor = color;
+      } else if (ag.flash && now < ag.flash.until) {
+        color = C.completed; label = ag.flash.text; lcolor = C.completed;
+      }
+      ag.dot.setAttribute("fill", color);
+      if (color === C.idle) ag.r.removeAttribute("stroke");
+      else ag.r.setAttribute("stroke", color);
+      if (ag.badge.textContent !== label) ag.badge.textContent = label;
+      ag.badge.setAttribute("fill", lcolor);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* wave panel: every level signal (queue_depth / slot_busy / conn_busy  */
+  /* / staging level) folds into a live d3-wave waveform from the SAME    */
+  /* SSE rows the scene plays — works identically for live runs and        */
+  /* replay, because replay streams the full row log through applyRow.     */
+  /* ------------------------------------------------------------------ */
+  var WV = { by: {}, order: [], dirty: false, open: true, lastRender: 0 };
+  window.__wave = WV; // wave-panel fold state (verification hook)
+  var WAVE_THROTTLE_MS = 900;
+
+  function waveLabel(comp, leaf) {
+    var c = shortName(comp)
+      .replace(/^database\.topology\./, "")
+      .replace(/^db\./, "");
+    if (leaf === "queue_depth") return c.replace(/\.ingress$/, "") + ".queue";
+    if (leaf === "slot_busy") return c + ".busy";
+    if (leaf === "conn_busy") return c + ".conns";
+    if (leaf === "level") return c + ".staging";
+    return c + "." + leaf;
+  }
+
+  function waveAdd(name, t, value) {
+    if (typeof value !== "number" || !isFinite(value)) return;
+    var s = WV.by[name];
+    if (!s) { s = WV.by[name] = { rows: [], isReal: false }; WV.order.push(name); }
+    if (name.slice(-7) === ".staging") s.isReal = true;
+    var rows = s.rows, last = rows[rows.length - 1];
+    if (last) {
+      if (t < last.t) return;
+      if (t === last.t) { last.value = value; WV.dirty = true; return; }
+      if (last.value === value) return;   // same level: extend the last plateau
+    }
+    rows.push({ t: t, value: value });
+    WV.dirty = true;
+  }
+
+  function waveState(msg) {
+    var el2 = $("wave-state");
+    if (el2) el2.textContent = msg;
+  }
+
+  function waveGraphFn() {  // vendored d3-wave UMD extends window.d3; older
+    if (window.d3wave && window.d3wave.WaveGraph) return window.d3wave.WaveGraph;
+    if (window.d3 && window.d3.WaveGraph) return window.d3.WaveGraph;
+    return null;             // builds referenced it as window.d3wave — accept both
+  }
+
+  function renderWave() {
+    var host = $("livewave");
+    if (!host) return;
+    if (!WV.open || !host.clientWidth) { WV.dirty = true; return; } // defer
+    WV.dirty = false;
+    WV.lastRender = performance.now();
+    var wgf = waveGraphFn();
+    if (!wgf) {
+      waveState("vendor JS missing (d3 / d3-wave)");
+      return;
+    }
+    if (!WV.order.length) { waveState("no level signals streamed yet"); return; }
+    var tMax = 0, pts = 0;
+    WV.order.forEach(function (n) {
+      var rows = WV.by[n].rows;
+      pts += rows.length;
+      if (rows.length) tMax = Math.max(tMax, rows[rows.length - 1].t);
+    });
+    tMax = Math.max(tMax, S.cursor || 0, 1);     // >=1: d3 zoom-extent guard
+    // this d3-wave build renders arbitrary level values through its enum row:
+    // every plateau is a box labelled with the value — ideal for queue-depth
+    // and occupancy waveforms. Root is a collapsible 'label' group.
+    // d3-wave labels axis ticks assuming VCD timescale quanta (ps base);
+    // sim time is seconds — scale by 1e12 so its unit ladder labels "s".
+    var TS = 1e12;
+    var children = WV.order.map(function (name) {
+      var sig = WV.by[name];
+      var rows = sig.rows;
+      var data = rows.map(function (r, i) {
+        var nextT = (i + 1 < rows.length) ? rows[i + 1].t : tMax;
+        var v = sig.isReal ? Math.round(r.value * 100) / 100 : Math.round(r.value);
+        return [r.t * TS, String(v), Math.max((nextT - r.t) * TS, 0)];
+      });
+      return { name: name, type: { name: "enum" }, data: data };
+    });
+    var w = Math.max(host.clientWidth - 8, 320);
+    var h = (children.length + 1) * 25 + 56;     // row 20 + ypadding 5 per signal
+    host.innerHTML = "";
+    var svg = d3.select(host).append("svg")
+      .attr("width", w).attr("height", h)
+      .style("width", w + "px").style("height", h + "px");
+    try {
+      var wg = new wgf(svg);
+      wg.bindData({ name: "queue signals", type: { name: "label" },
+        children: children });
+    } catch (e) {
+      waveState("wave render failed: " + e);
+      return;
+    }
+    waveState(WV.order.length + " queue signals · " + pts + " samples · t≤" +
+      tMax.toFixed(2) + (S.playing ? " · streaming" : " · final"));
+  }
+
+  function resetWave() {
+    WV.by = {}; WV.order = []; WV.dirty = false;
+    var host = $("livewave");
+    if (host) host.innerHTML = "";
+    waveState("waiting for level signals…");
   }
 
   /* ------------------------------------------------------------------ */
@@ -462,6 +650,7 @@
   function ease(cur, tgt, dt) { return cur + (tgt - cur) * (1 - Math.exp(-3.2 * dt)); }
 
   function paint(dt) {
+    paintAgents();
     [M.llm].concat(M.db.compute, M.db.storage).forEach(function (n) {
       if (!n) return;
       n.queue = ease(n.queue, n.queueTarget, dt);
@@ -519,19 +708,54 @@
     $("clock").textContent = S.cursor === null ? "0.00" : S.cursor.toFixed(2);
     if (S.until > 0)
       $("bar").style.width = (clamp(S.cursor || 0, 0, S.until) / S.until * 100).toFixed(1) + "%";
+    if (WV.dirty && WV.open && now - WV.lastRender > WAVE_THROTTLE_MS) renderWave();
   }
 
   function freezeAtEnd() {
     S.playing = false;
+    if (!M) { setPill("idle"); return; }   // never played a frame (idle stream)
     // playback caught the whole run: show the exact authoritative totals
     var c = S.counters;
     c.in_disp = c.in_auth; c.out_disp = c.out_auth;
     c.in_pending = 0; c.out_pending = 0;
     paint(0.001);
+    renderWave();  // final waveform frame — no signal left unpainted
     setPill(S.error ? "error" : "done");
     $("clock").textContent = S.lastT.toFixed(2);
     $("bar").style.width = "100%";
+    setLaunch(S.error ? "error" : "again",
+      S.error ? S.error : "run complete · frozen at the last frame");
     if (S.donePayload && S.donePayload.report) showFinish(S.donePayload);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* launch button state machine — the click must never feel lost:       */
+  /* LAUNCH → ⏳ LAUNCHING… → ◉ RUNNING… → ▶ LAUNCH AGAIN, and every     */
+  /* failure (409 / 422 / transport / run error) shows inline next to    */
+  /* the button and re-enables it. /live/state is the truth: even a dead */
+  /* SSE stream can never leave the button stuck disabled.               */
+  /* ------------------------------------------------------------------ */
+  var LAUNCH_TXT = "▶ launch live run";
+  function setMsg(text, cls) {
+    var m = $("form-msg");
+    m.textContent = text || "";
+    m.className = "msg" + (cls ? " " + cls : "");
+  }
+  function setLaunch(mode, msg, msgCls) {
+    S.launchMode = mode;
+    var b = $("launch");
+    b.classList.remove("sending", "running");
+    if (mode === "sending") {
+      b.disabled = true; b.classList.add("sending"); b.textContent = "⏳ launching…";
+    } else if (mode === "running") {
+      b.disabled = true; b.classList.add("running"); b.textContent = "◉ running…";
+    } else if (mode === "again") {
+      b.disabled = false; b.textContent = "▶ launch again";
+    } else {  // idle | error
+      b.disabled = false; b.textContent = LAUNCH_TXT;
+    }
+    if (msg !== undefined) setMsg(msg, msgCls === undefined ?
+      (mode === "error" ? "" : "ok") : msgCls);
   }
 
   /* ------------------------------------------------------------------ */
@@ -549,6 +773,7 @@
     S.dots = [];
     S.counters = { in_auth: 0, out_auth: 0, in_disp: 0, out_disp: 0,
       in_pending: 0, out_pending: 0 };
+    resetWave();
     $("finish").classList.add("hidden");
     $("bar").style.width = "0%";
   }
@@ -561,19 +786,30 @@
     M = buildModel(d.config);
     renderScene();
     updatePill();
-    var live = S.status === "running" || S.status === "starting";
-    $("launch").disabled = live;
-    $("form-msg").textContent = live
-      ? "streaming live run " + d.run_id
-      : "replaying finished run " + d.run_id;
-    $("form-msg").className = "msg ok";
+    if (S.status === "running" || S.status === "starting") {
+      setLaunch("running", "streaming live run " + d.run_id);
+    } else if (S.status === "error") {
+      setLaunch("error", d.error || "live run failed");
+    } else {
+      setLaunch("again", "replaying finished run " + d.run_id);
+    }
     startPlayback();
   }
 
   function connectStream() {
     if (es) return;
     es = new EventSource("/live/stream");
-    es.addEventListener("init", function (e) { applyInit(JSON.parse(e.data)); });
+    es.addEventListener("init", function (e) {
+      var d = JSON.parse(e.data);
+      // A zombie auto-reconnect of a stream we already drained (done) must
+      // never reseat the scene mid-replay — that reads like the run restarting
+      // itself. Fresh runs (different run_id) still adopt normally.
+      if (S.streamDone && d.run_id === S.runId) {
+        if (es) { es.close(); es = null; }
+        return;
+      }
+      applyInit(d);
+    });
     es.addEventListener("delta", function (e) {
       var d = JSON.parse(e.data);
       (d.rows || []).forEach(function (r) {
@@ -585,22 +821,30 @@
     es.addEventListener("done", function (e) {
       var d = JSON.parse(e.data);
       S.streamDone = true;
-      if (d.error) { S.error = d.error; $("form-msg").textContent = d.error;
-        $("form-msg").className = "msg"; }
+      if (d.error) S.error = d.error;
       S.donePayload = d;
       if (es) { es.close(); es = null; }
-      $("launch").disabled = false;
-      // the server run is over: still-catching-up playback is a REPLAY,
-      // already caught up freezes on the last frame
-      if (!S.playing || S.cursor === null || S.cursor >= S.lastT) freezeAtEnd();
-      else updatePill();
+      // the server run is over. If init/deltas/done all landed before the
+      // first animation frame (fast runs do exactly this), the queue still
+      // holds unplayed rows: PLAY them — freezing here would leave the scene
+      // stuck on an empty t=0 frame and look like nothing launched.
+      if (S.cursor === null && S.queue.length) {
+        startPlayback();
+        updatePill();
+      } else if (!S.playing || S.cursor >= S.lastT) {
+        freezeAtEnd();
+      } else {
+        updatePill();
+        setLaunch(d.error ? "error" : "again",
+          d.error || "server run finished — page catching up (REPLAY)");
+      }
     });
     es.addEventListener("error", function (e) {
       // named SSE "error" event (no run yet) carries a detail payload
       if (e.data) {
         try {
           var d = JSON.parse(e.data);
-          if (d.detail) $("form-msg").textContent = d.detail;
+          if (d.detail) setMsg(d.detail);
         } catch (err) { /* transport-level retry errors have no data */ }
       }
     });
@@ -642,6 +886,10 @@
     fetch("/live/state").then(function (r) { return r.json(); }).then(function (st) {
       if (!st || !st.run_id) {
         if (!es && !S.runId) setPill("idle");
+        if (es === null && S.runId) {   // server restarted: its slot is gone —
+          S.runId = null;               // never leave a stale run blocking the UI
+          setLaunch("idle", "server idle — launch a run");
+        }
         return;
       }
       if (st.run_id !== S.runId) {   // form-OR-API-launched new run: re-adopt
@@ -649,8 +897,18 @@
         connectStream();
         return;
       }
-      S.status = st.status;          // same run: keep pill honest (e.g. the
-      updatePill();                  // stream died before delivering "done")
+      S.status = st.status;          // same run: keep pill AND the launch
+      updatePill();                  // button honest even if the stream died
+      if (st.status === "running" || st.status === "starting") {
+        if (S.launchMode !== "running") setLaunch("running", "live run " + st.run_id + " streaming");
+      } else if (st.status === "error") {
+        if (S.launchMode !== "error") setLaunch("error", st.error || "live run failed");
+      } else if (S.launchMode === "sending" || S.launchMode === "running") {
+        // server finished while the page still shows launching/running (the
+        // done event may never have arrived): unblock the button NOW —
+        // waiting for the replay to catch up at 1× would look like a stuck UI
+        setLaunch("again", "server run finished — page catching up (REPLAY)");
+      }
     }).catch(function () { /* server briefly unreachable; retry next tick */ });
   }
 
@@ -686,32 +944,38 @@
 
   $("runform").addEventListener("submit", function (ev) {
     ev.preventDefault();
+    var scenario = $("scenario").value;
+    if (!scenario) {   // picker still loading / no scenarios: say so locally
+      setLaunch("error", "pick a scenario first (the picker is still loading?)");
+      return;
+    }
     var overrides = {};
     OVR.forEach(function (k) {
       var v = $(k).value;
       if (v !== "") overrides[k] = v;
     });
-    $("launch").disabled = true;
-    $("form-msg").className = "msg";
-    $("form-msg").textContent = "launching…";
+    setLaunch("sending", "contacting server…");
     fetch("/live/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scenario: $("scenario").value, overrides: overrides }),
+      body: JSON.stringify({ scenario: scenario, overrides: overrides }),
     }).then(function (r) {
       return r.json().then(function (j) { return { code: r.status, j: j }; });
     }).then(function (res) {
       if (res.code === 202) {
-        // the new run's init event reseats the scene/queue/counters
+        // the new run's init event reseats the scene/queue/counters and
+        // flips the button to RUNNING; until then it stays LAUNCHING…
         if (es) { es.close(); es = null; }
         connectStream();
+        setLaunch("sending", "launched " + (res.j.run_id || "run") +
+          " · adopting stream…");
       } else {
-        $("form-msg").textContent = (res.j && res.j.detail) || ("HTTP " + res.code);
-        $("launch").disabled = false;
+        // 409 (one run at a time) / 422 (bad scenario or override): inline,
+        // next to the button, and clickable again
+        setLaunch("error", (res.j && res.j.detail) || ("HTTP " + res.code));
       }
     }).catch(function (err) {
-      $("form-msg").textContent = String(err);
-      $("launch").disabled = false;
+      setLaunch("error", "launch request failed: " + err);
     });
   });
 
@@ -722,7 +986,31 @@
     b.classList.add("on");
   });
 
+  $("wavetoggle").addEventListener("click", function () {
+    WV.open = !WV.open;
+    $("wavepanel").classList.toggle("collapsed", !WV.open);
+    document.body.classList.toggle("wave-open", WV.open);
+    this.textContent = WV.open ? "▾ hide" : "▸ show";
+    if (WV.open) renderWave();
+  });
+
+  /* standby scene: the stage must never read as "broken/stuck" before the
+     first run — draw the frame + an explicit waiting message at t=0. */
+  function renderStandby() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var grid = el("g", { class: "gridlines" }, svg);
+    for (var gx = 0; gx <= 1300; gx += 65) el("line", { x1: gx, y1: 0, x2: gx, y2: 720 }, grid);
+    for (var gy = 0; gy <= 720; gy += 60) el("line", { x1: 0, y1: gy, x2: 1300, y2: gy }, grid);
+    txt(svg, "frame-note", 16, 24, "live topology — agent ⇄ llm ⇄ db");
+    txt(svg, "standby", 650, 350, "no live run yet", "middle");
+    txt(svg, "standby-sub", 650, 374,
+      "pick a scenario · press launch · the scene rebuilds from the run config",
+      "middle");
+  }
+
   loadScenarios();
+  renderStandby();
+  document.body.classList.add("wave-open");   // panel starts open
   pollState();
   setInterval(pollState, STATE_POLL_MS);
 })();

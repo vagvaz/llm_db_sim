@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}agent-db-sim — live{% endblock %}</title>
   {% block head %}{% endblock %}
+  <link rel="stylesheet" href="/static/d3-wave.css">
   <link rel="stylesheet" href="/static/live.css">
 </head>
 <body class="live-body">
@@ -97,6 +98,10 @@
           dots are requests riding the wiring. The view plays streamed samples
           on its own sim-clock; token counters pace billed tokens at the
           endpoint's configured tok/s and snap to exact totals at the end.
+          The agent badges label the closed-loop wait (<b>thinking</b> =
+          inference response pending, <b>querying</b> = db response pending)
+          with elapsed sim time, so a waiting agent never reads as stuck. The
+          bottom panel traces every queue/occupancy signal as a live waveform.
           <b>LIVE</b> = the server run is running, <b>REPLAY</b> = playback of
           a finished run.</p>
       </div>
@@ -108,7 +113,21 @@
       <div id="tooltip" class="tooltip hidden"></div>
     </section>
   </main>
+
+  <section class="wave-panel" id="wavepanel">
+    <header class="wave-head">
+      <span class="dotline"></span>
+      <h2>queue waveforms · live signals</h2>
+      <p id="wave-state">waiting for level signals…</p>
+      <button type="button" id="wavetoggle">▾ hide</button>
+    </header>
+    <div id="livewave" class="wave-body"></div>
+  </section>
 </div>
+{# offline vendor chain for the live waveform panel: d3 → farawesome shim → d3-wave #}
+<script src="/static/d3.min.js" defer></script>
+<script src="/static/fa-icons.js" defer></script>
+<script src="/static/d3-wave.js" defer></script>
 <script src="/static/live.js" defer></script>
 </body>
 </html>

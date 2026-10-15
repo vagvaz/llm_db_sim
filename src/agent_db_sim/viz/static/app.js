@@ -11,12 +11,15 @@
     var stateEl = document.getElementById('stream-state');
     var waveEl = document.getElementById('wave');
 
-    if (!(window.d3 && window.d3wave)) {
+    // vendored d3-wave UMD extends the d3 namespace (d3.WaveGraph); older
+    // builds referenced it as window.d3wave — accept both.
+    var waveGraphFn = function () {
+        if (window.d3wave && window.d3wave.WaveGraph) return window.d3wave.WaveGraph;
+        if (window.d3 && window.d3.WaveGraph) return window.d3.WaveGraph;
+        return null;
+    };
+    if (!waveGraphFn()) {
         if (stateEl) stateEl.textContent = 'vendor JS missing (d3 / d3-wave)';
-        return;
-    }
-    if (!window.d3wave.WaveGraph) {
-        if (stateEl) stateEl.textContent = 'd3-wave bundle incomplete';
         return;
     }
 
@@ -91,22 +94,34 @@
             var rows = signals[n].rows;
             if (rows.length) tMax = Math.max(tMax, rows[rows.length - 1].t);
         });
-        var graphData = sigNames.map(function (name) {
+        // this d3-wave build renders value plateaus through enum rows; the
+        // graph is a labelled tree: root 'label' node + one child per signal
+        // d3-wave labels ticks assuming VCD timescale quanta (ps base); the
+        // parsed stream time is already in sim seconds, so scale by 1e12 to
+        // land on the library's "s" unit ladder.
+        var TS = 1e12;
+        var children = sigNames.map(function (name) {
             var sig = signals[name];
             var rows = sig.rows;
             var data = rows.map(function (r, i) {
-                var nextT = (i + 1 < rows.length) ? rows[i + 1].t : tMax;
-                return [r.t, r.value, nextT - r.t];
+                var nextT = (i + 1 < rows.length) ? rows[i + 1].t : Math.max(tMax, 1);
+                return [r.t * TS, String(r.value), Math.max((nextT - r.t) * TS, 0)];
             });
-            return {
-                name: name,
-                type: Object.assign({ name: name }, sig.type),
-                data: data,
-                children: undefined,
-            };
+            return { name: name, type: { name: 'enum' }, data: data };
         });
-        var wg = window.d3wave.WaveGraph;
-        d3.select(waveEl).call(wg(graphData));
+        var w = Math.max(waveEl.clientWidth - 8, 320);
+        var h = (children.length + 1) * 25 + 56;
+        var svg = d3.select(waveEl).append('svg')
+            .attr('width', w).attr('height', h)
+            .style('width', w + 'px').style('height', h + 'px');
+        try {
+            var WGF = waveGraphFn();
+            var wg = new WGF(svg);
+            wg.bindData({ name: 'signals', type: { name: 'label' },
+                          children: children });
+        } catch (e) {
+            note('wave render failed: ' + e);
+        }
     }
 
     function connectStream() {

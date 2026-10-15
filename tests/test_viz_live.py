@@ -309,6 +309,96 @@ def test_samples_tail_missing_db(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------- #
+# component capability metadata in the resolved init config              #
+# --------------------------------------------------------------------- #
+
+def test_display_cfg_capabilities_sanity_queue() -> None:
+    """The live scene draws every component's processing capability from the
+    run's RESOLVED config: LLM slots + tok/s caps, DB compute slots per node,
+    the storage backend's IOPS/bandwidth ceilings, network bandwidth + pool."""
+    from omegaconf import OmegaConf
+
+    from agent_db_sim.viz.live import _display_cfg
+
+    cfg = OmegaConf.load(SCENARIOS / "sanity" / "sanity_queue.yaml")
+    out = _display_cfg(cfg)
+    assert out["llm"] == {
+        "slots": 1,
+        "input_tokens_per_s": 1024.0,
+        "output_tokens_per_s": 256.0,
+        "ingress": "fifo",
+    }
+    db = out["db"]
+    assert db["topology"] == "centralized"
+    assert db["compute"] == {
+        "slots": 2, "ingress": "fifo", "issue_ratio": 0.25,
+        "phase_split": "three_phase",
+    }
+    # ssd preset ceilings, resolved through the very registry the sim uses
+    assert db["storage"]["backend"] == "ssd"
+    assert db["storage"]["iops_ceiling"] == 75000.0
+    assert db["storage"]["bandwidth_ceiling"] == 0.4
+    # centralized has no net section: schema defaults come through
+    assert db["network"]["bandwidth"] == 1000.0
+    assert db["network"]["connections"] == 0  # 0 = unlimited pool
+
+
+def test_display_cfg_capabilities_distributed() -> None:
+    from omegaconf import OmegaConf
+
+    from agent_db_sim.viz.live import _display_cfg
+
+    cfg = OmegaConf.load(SCENARIOS / "db_distributed.yaml")
+    out = _display_cfg(cfg)
+    db = out["db"]
+    assert db["topology"] == "distributed"
+    assert db["compute_nodes"] == 4
+    assert db["coordinators"] == 2
+    assert db["compute"]["slots"] == 2
+    assert db["storage"]["backend"] == "nvme"
+    assert db["storage"]["iops_ceiling"] == 750000.0
+    assert db["storage"]["bandwidth_ceiling"] == 5.0
+    assert db["network"]["latency"] == 0.001
+    assert db["network"]["bandwidth"] == 1000.0
+    assert db["network"]["coordinator_overhead"] == 1.1
+
+
+def test_display_cfg_survives_unknown_backend() -> None:
+    """A scenario with an unresolvable backend still renders (the run itself
+    will fail loudly, but the launch/init payload must not break on display)."""
+    from omegaconf import OmegaConf
+
+    from agent_db_sim.viz.live import _display_cfg
+
+    cfg = OmegaConf.create({"agents": {"count": 1}, "llm": {"slots": 2},
+                            "db": {"topology": "centralized",
+                                   "storage": {"backend": "tape-o-matic"}}})
+    out = _display_cfg(cfg)
+    assert out["db"]["backend"] == "tape-o-matic"
+    assert out["db"]["storage"] == {"backend": "tape-o-matic"}
+
+
+def test_init_payload_carries_capabilities(tmp_path: Path) -> None:
+    """The streamed init config is the scene's rebuild source: capability
+    fields must be present end-to-end, not only unit-side."""
+    client = TestClient(_app(tmp_path))
+    r = client.post(
+        "/live/run",
+        json={"scenario": "sanity/sanity_queue.yaml",
+              "overrides": {"sim.until": 14}},
+    )
+    assert r.status_code == 202
+    cfg = r.json()["config"]  # POST response carries the same public() shape
+    assert cfg["db"]["compute"]["slots"] == 2
+    assert cfg["db"]["storage"]["iops_ceiling"] == 75000.0
+    assert cfg["db"]["network"]["bandwidth"] == 1000.0
+    assert cfg["llm"]["ingress"] == "fifo"
+    init = _events(client, "/live/stream")[0]["data"]
+    assert init["config"]["db"]["storage"]["bandwidth_ceiling"] == 0.4
+    _wait_done(client)
+
+
+# --------------------------------------------------------------------- #
 # live-fidelity regressions (loop review #1)                             #
 # --------------------------------------------------------------------- #
 

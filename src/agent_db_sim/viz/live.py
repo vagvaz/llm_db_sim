@@ -18,6 +18,7 @@ import json
 import multiprocessing
 import sqlite3
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -361,23 +362,84 @@ def _safe_select(cfg: Any, key: str) -> Any:
 
 
 def _display_cfg(cfg: Any) -> Dict[str, Any]:
-    """The subset of the resolved config the live view needs to draw."""
+    """The subset of the resolved config the live view needs to draw.
+
+    Carries every component's *processing capabilities* (LLM slot count and
+    token-rate ceilings, DB compute slots-per-node and node counts, the
+    resolved storage backend preset with its IOPS/bandwidth ceilings, and the
+    internal-network link bandwidth + connection-pool size) so the scene can
+    label them straight from the run's resolved config. The storage/network
+    values are resolved through the very code the simulation itself uses
+    (``resolve_backend_params`` / ``NetworkConfig``), so what the page shows
+    is exactly what the run models.
+    """
 
     def sel(key: str, default: Any = None) -> Any:
         v = OmegaConf.select(cfg, key)
         return default if v is None else v
 
+    def section(key: str) -> Dict[str, Any]:
+        v = OmegaConf.select(cfg, key)
+        try:
+            if v is None:
+                return {}
+            if isinstance(v, Mapping):
+                return dict(v)
+            return OmegaConf.to_container(v, resolve=True) or {}
+        except Exception:
+            return {}
+
+    compute_cfg = section("db.compute")
+    storage_cfg = section("db.storage")
+    network_cfg = section("db.network")
+
+    backend = str(sel("db.storage.backend", "ssd"))
+    storage: Dict[str, Any] = {"backend": backend}
+    try:  # same resolution path the DB endpoint builds its nodes from
+        from agent_db_sim.components.db.backend import resolve_backend_params
+
+        storage.update(resolve_backend_params(storage_cfg or storage).as_dict())
+    except Exception:
+        pass  # unknown preset etc: the run itself will fail; show bare name
+
+    network: Dict[str, Any] = {}
+    try:
+        from agent_db_sim.components.db.network import NetworkConfig
+
+        nc = NetworkConfig(network_cfg)
+        network = {
+            "latency": nc.latency,
+            "bandwidth": nc.bandwidth,
+            "capacity": nc.capacity,
+            "connections": nc.connections,
+            "request_size": nc.request_size,
+            "coordinator_overhead": nc.coordinator_overhead,
+        }
+    except Exception:
+        pass
+
+    topology = str(sel("db.topology", "centralized"))
     return {
         "agents": {"count": int(sel("agents.count", 1))},
         "llm": {
             "slots": int(sel("llm.slots", 1)),
             "input_tokens_per_s": float(sel("llm.input_tokens_per_s", 0.0) or 0.0),
             "output_tokens_per_s": float(sel("llm.output_tokens_per_s", 0.0) or 0.0),
+            "ingress": str(sel("llm.ingress", "fifo")),
         },
         "db": {
-            "topology": str(sel("db.topology", "centralized")),
+            "topology": topology,
             "compute_nodes": int(sel("db.compute_nodes", 1)),
             "storage_nodes": int(sel("db.storage_nodes", 1)),
-            "backend": str(sel("db.storage.backend", "ssd")),
+            "coordinators": int(sel("db.coordinators", 1)),
+            "backend": backend,
+            "compute": {
+                "slots": int(compute_cfg.get("slots", 1) or 1),
+                "ingress": str(compute_cfg.get("ingress", "fifo")),
+                "issue_ratio": float(compute_cfg.get("issue_ratio", 0.1) or 0.1),
+                "phase_split": str(compute_cfg.get("phase_split", "three_phase")),
+            },
+            "storage": storage,
+            "network": network,
         },
     }

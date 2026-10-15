@@ -29,7 +29,8 @@ body.live-body {
   min-height: 100vh;
 }
 
-.frame { display: flex; flex-direction: column; min-height: 100vh; }
+.frame { display: flex; flex-direction: column; height: 100vh; min-height: 640px; }
+@media (max-width: 900px) { .frame { height: auto; } }
 
 /* -- header ------------------------------------------------------------ */
 header.top {
@@ -81,6 +82,7 @@ nav.links a.here { color: var(--green); border-bottom-color: var(--green); }
 /* -- main grid ---------------------------------------------------------- */
 main.grid {
   display: grid; grid-template-columns: 320px 1fr; gap: 0; flex: 1;
+  min-height: 0;
 }
 @media (max-width: 900px) { main.grid { grid-template-columns: 1fr; } }
 
@@ -89,6 +91,7 @@ aside.panel {
   padding: 1rem 1.1rem 1.4rem;
   background: linear-gradient(180deg, var(--panel), var(--bg2) 70%);
   overflow-y: auto;
+  min-height: 0;
 }
 .panel-head { display: flex; align-items: center; gap: .6rem; margin: 1rem 0 .7rem; }
 .panel-head:first-child { margin-top: 0; }
@@ -123,6 +126,11 @@ button#launch {
 button#launch:hover { filter: brightness(1.1); }
 button#launch:disabled { background: var(--line); color: var(--dim);
   cursor: wait; box-shadow: none; }
+button#launch.sending { background: linear-gradient(180deg, #8aa2bd, #5f7690);
+  color: #0c1220; cursor: wait; }
+button#launch.running { background: linear-gradient(180deg, #ffc06a, #e8933a);
+  color: #231204; cursor: wait; box-shadow: 0 0 18px -3px var(--amber);
+  animation: pulse 1.6s ease-in-out infinite; }
 .msg { font-size: .74rem; color: var(--red); min-height: 1em; margin: .4rem 0 0; }
 .msg.ok { color: var(--green); }
 
@@ -151,8 +159,8 @@ button#launch:disabled { background: var(--line); color: var(--dim);
 .hidden { display: none !important; }
 
 /* -- stage --------------------------------------------------------------- */
-section.stage { position: relative; padding: .8rem; }
-svg#topo { width: 100%; height: calc(100vh - 120px); min-height: 560px; display: block; }
+section.stage { position: relative; padding: .8rem; min-height: 0; overflow: hidden; }
+svg#topo { width: 100%; height: 100%; min-height: 420px; display: block; }
 
 /* svg families */
 .node rect, .node path { fill: #16202e; stroke: var(--line); stroke-width: 1; }
@@ -172,9 +180,33 @@ svg#topo { width: 100%; height: calc(100vh - 120px); min-height: 560px; display:
 .cyl-top { fill: #1a2636; stroke: var(--line); }
 .cyl-fill { fill: url(#qgrad); opacity: .9; }
 .badge text { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.n-badge { font-size: 9.5px; letter-spacing: .04em; fill: #5b6b81; }
 .req-dot { stroke: none; }
 .gridlines line { stroke: #131a26; stroke-width: 1; }
 .frame-note { font-size: 10px; fill: #35435a; letter-spacing: .22em; text-transform: uppercase; }
+.standby { font-size: 15px; fill: #46566e; letter-spacing: .28em; text-transform: uppercase; }
+.standby-sub { font-size: 10px; fill: #35435a; letter-spacing: .12em; }
+
+/* -- wave panel (live d3-wave queue signals) --------------------------- */
+.wave-panel { border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, #0d1420, var(--bg)); }
+.wave-head { display: flex; align-items: center; gap: .8rem;
+  padding: .45rem 1.1rem .35rem; }
+.wave-head h2 { font-size: .74rem; margin: 0; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+.wave-head #wave-state { margin: 0; font-size: .7rem; color: #55657c;
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wave-head .dotline { flex: none; width: 40px; }
+.wave-head button { font: inherit; font-size: .7rem; letter-spacing: .08em;
+  color: var(--dim); background: transparent; border: 1px solid var(--line);
+  border-radius: 4px; padding: .2rem .55rem; cursor: pointer; }
+.wave-head button:hover { color: var(--ink); border-color: var(--cyan); }
+.wave-body { height: min(210px, 32vh); overflow: auto; padding: .2rem .6rem .5rem; }
+.wave-panel.collapsed .wave-body { display: none; }
+.wave-body .d3-wave { background: #0c111b; border: 1px solid var(--line-soft);
+  border-radius: 6px; }
+/* d3-wave defaults are phosphor-on-black; keep it readable on our panel */
+.wave-body svg text { font-family: inherit; }
 
 /* tooltip */
 .tooltip {

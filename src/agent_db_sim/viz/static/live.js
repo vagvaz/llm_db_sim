@@ -61,11 +61,18 @@
     completed: "#3fd68f", transfer: "#b28dff",
   };
 
+  /* AUTO replay pace (mirrors viz/live.py PACE_TARGET_SECONDS): render the
+     whole run in ~30 s wall so short/early windows never read as frozen.
+     The speed buttons are manual overrides; max is unchanged. */
+  var PACE_TARGET = 30;
+
   /* ------------------------------------------------------------------ */
   var S = {
-    speed: 1, queue: [], qi: 0, cursor: null, lastT: 0,
+    speed: 1, pace: "auto", paceHint: 1, rate: 1,   // eff. replay rate (live)
+    queue: [], qi: 0, cursor: null, lastT: 0,
     streamDone: false, playing: false, error: null, runId: null, until: 0,
     status: null, launchMode: "idle",   // idle | sending | waiting | running | done | error
+    scenario: null, overrides: {}, editors: [], cfg: null,   // ✎-editor relaunch data
     // authoritative event totals + continuously-paced display values:
     // events bill a request's tokens at service start (input) / completion
     // (output); the view drains the pending pool at the configured aggregate
@@ -75,6 +82,9 @@
     dots: [],
   };
   window.__live = S; // test/verification hook
+  Object.defineProperty(window, "__scene", {
+    get: function () { return M; },   // live scene model (verification hook)
+  });
   var MAX_AGENTS = 10, MAX_SLOTS = 16, MAX_NODES = 4;
   var M = null, SC = null;
 
@@ -99,7 +109,7 @@
       agentCount: cfg.agents.count,
       llm: { name: "llm", slots: cfg.llm.slots, ingress: cfg.llm.ingress || "fifo",
         queue: 0, queueTarget: 0, busy: 0, busyTarget: 0, requests: 0,
-        served: 0, agents: [] },
+        served: 0, agents: [], firstEta: cfg.llm.first_completion_eta || null },
       db: { topology: db.topology, backend: db.backend,
         compute: [], storage: [],
         nodes: db.compute_nodes || 1,
@@ -141,8 +151,10 @@
       " 0 z" }, clip);
     fill.setAttribute("clip-path", "url(#" + clipId + ")");
     el("ellipse", { class: "cyl-top", cx: x + w / 2, cy: top, rx: w / 2, ry: ry / 2 }, g);
-    var val = txt(g, "n-val", x + w / 2, y + h + 14, "0", "middle");
-    txt(g, "n-sub", x + w / 2, y + h + 29, label, "middle");
+    // queue counter lives INSIDE the cylinder body (small, near the top): the
+    // old big value under the cylinder is what collided with card titles
+    var val = txt(g, "cyl-val", x + w / 2, top + 14, "0", "middle");
+    if (label) txt(g, "cyl-lab", x + w / 2, y + h + 13, label, "middle");
     return { g: g, fill: fill, val: val, top: top, bottom: bottom, bodyH: h - ry,
       max: 2 };
   }
@@ -182,6 +194,27 @@
   /* ------------------------------------------------------------------ */
   /* scene                                                               */
   /* ------------------------------------------------------------------ */
+  /* bar width that guarantees n bars + gaps fit a given avail width */
+  function slotW(avail, n, gap) {
+    return Math.max(3, Math.floor((avail + gap) / Math.max(n, 1)) - gap);
+  }
+
+  /* ✎ affordance: opens the per-component inline editor (B: change rates /
+     per-component values by clicking on them). Paths come from the server's
+     editor schema so every emitted override is a validated OVERRIDABLE key. */
+  function editAff(parent, cx, cy, comp, tip) {
+    var g = el("g", { class: "edit-aff", "data-comp": comp }, parent);
+    el("rect", { x: cx - 9, y: cy - 10, width: 18, height: 18, rx: 4 }, g);
+    var t = el("text", { x: cx, y: cy + 3.5, "text-anchor": "middle" }, g);
+    t.textContent = "\u270E";
+    el("title", {}, g).textContent = tip;
+    g.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      openEditor(comp);
+    });
+    return g;
+  }
+
   function renderScene() {
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     var defs = el("defs", {}, svg);
@@ -202,15 +235,17 @@
 
     /* agents */
     var shown = Math.min(M.agentCount, MAX_AGENTS);
-    var ax = 46, ay = 100, aw = 150, ah = 46, agap = 12;
+    var ax = 46, ay = 108, aw = 150, ah = 44, agap = 11;
     var agG = el("g", {}, svg);
-    txt(agG, "n-sub", ax, ay - 14, "agent pool · ×" + M.agentCount);
+    txt(agG, "n-sub", ax, ay - 22, "agent pool · ×" + M.agentCount);
+    editAff(agG, ax + aw - 4, ay - 26, "agents",
+      "edit agent pool: count + first-step weights");
     for (var i = 0; i < shown; i++) {
       var y = ay + i * (ah + agap);
       var g = el("g", { class: "node agent" }, agG);
       var r = el("rect", { x: ax, y: y, width: aw, height: ah, rx: 8 }, g);
-      txt(g, "n-title", ax + 11, y + 20, "agent-" + i);
-      var badge = txt(g, "n-badge", ax + 11, y + 37, "");
+      txt(g, "n-title", ax + 11, y + 19, "agent-" + i);
+      var badge = txt(g, "n-badge", ax + 11, y + 35, "");
       var dot = el("circle", { class: "state-dot", cx: ax + aw - 13,
         cy: y + ah / 2, r: 5, fill: C.idle }, g);
       titleOf(g, "agent-" + i + " — closed-loop: inference then grounded db query");
@@ -222,25 +257,31 @@
         "+" + (M.agentCount - shown) + " more (round-robin)");
 
     /* LLM endpoint */
-    var lx = 356, ly = 130, lw = 230, lh = 420;
+    var lx = 356, ly = 130, lw = 230, lh = 430;
     var lg = el("g", { class: "node" }, svg);
     el("rect", { x: lx, y: ly, width: lw, height: lh, rx: 12, fill: "#16202e",
       stroke: "#232c3b" }, lg);
     txt(lg, "n-title", lx + 14, ly + 28, "llm.server");
+    editAff(lg, lx + lw - 18, ly + 24, "llm",
+      "edit llm.server: slots · tok/s · ingress");
     txt(lg, "n-sub", lx + 14, ly + 46, "cap · in " + fmtTok(M.rates.in) +
       " · out " + fmtTok(M.rates.out) + " tok/s");
     txt(lg, "n-sub", lx + 14, ly + 60, M.llm.slots + " slot" +
       (M.llm.slots === 1 ? "" : "s") + " · " + M.llm.ingress + " ingress");
-    M.llm.cyl = cylinder(lg, lx + 26, ly + 76, 62, 164, "ingress");
+    M.llm.cyl = cylinder(lg, lx + 24, ly + 82, 58, 148, "queue");
     var nb = Math.min(M.llm.slots, MAX_SLOTS);
-    txt(lg, "n-sub", lx + 108, ly + 92, "slots busy · " + M.llm.slots +
+    txt(lg, "n-sub", lx + 106, ly + 98, "slots busy · " + M.llm.slots +
       (M.llm.slots > nb ? " (" + nb + " shown)" : ""));
-    M.llm.bars = slotRow(lg, lx + 108, ly + 102, nb,
-      clamp(Math.floor(110 / nb), 6, 22), 4, 138);
-    M.llm.counterTxt = txt(lg, "n-val", lx + 14, ly + lh - 44, "in 0 · out 0",
+    M.llm.bars = slotRow(lg, lx + 106, ly + 108, nb,
+      slotW(lw - 106 - 8, nb, 3), 3, 126);
+    M.llm.counterTxt = txt(lg, "n-val", lx + 14, ly + lh - 62, "in 0 · out 0",
       "start", "hud-tokens");
-    M.llm.flowTxt = txt(lg, "n-val", lx + 14, ly + lh - 22, "req 0 · served 0",
+    M.llm.flowTxt = txt(lg, "n-val", lx + 14, ly + lh - 44, "req 0 · served 0",
       "start", "hud-flow");
+    // honest status line during a heavy-prefill phase (served=0 while many
+    // input tokens are billed): the ETA is config-computable (tokens/rates)
+    M.llm.phaseTxt = txt(lg, "n-phase", lx + 14, ly + lh - 22, "", "start",
+      "hud-phase");
 
     /* DB endpoint shell */
     var dbX = 640, dbY = 70, dbW = 634, dbH = 590;
@@ -258,8 +299,8 @@
       stroke: "#1b2534", "stroke-dasharray": "3 7" }, dbg);
     txt(dbg, "n-sub", dbX + 14, dbY + 24, head);
 
-    var cw = M.db.compute.length === 1 ? 190 : 128, ch = 250;
-    var cx0 = dbX + 36, cy0 = dbY + 56;
+    var cw = M.db.compute.length === 1 ? 190 : 128, ch = 232;
+    var cx0 = dbX + 36, cy0 = dbY + 58;
     var cstep = M.db.compute.length > 1
       ? (dbW - 72 - cw) / (M.db.compute.length - 1) : 0;
     M.db.compute.forEach(function (c, i) {
@@ -268,11 +309,18 @@
       el("rect", { x: c.x, y: c.y, width: cw, height: ch, rx: 10, fill: "#151d2a",
         stroke: "#232c3b" }, g);
       txt(g, "n-title", c.x + 12, c.y + 26, c.name);
-      txt(g, "n-sub", c.x + cw - 12, c.y + 26, "×" + cSlots + " slots", "end");
-      c.cyl = cylinder(g, c.x + 16, c.y + 44, 50, 130, "ingress");
-      var ns = Math.min(6, MAX_SLOTS);
-      txt(g, "n-sub", c.x + 82, c.y + 56, "compute slots");
-      c.bars = slotRow(g, c.x + 82, c.y + 66, ns, Math.max(6, (cw - 100) / ns - 4), 4, 108);
+      editAff(g, c.x + cw - 15, c.y + 23, "compute",
+        "edit compute nodes: slots · ingress · issue ratio");
+      // capability chip lives on its own line now (was right-aligned on the
+      // title line, where long texts collided with the node name)
+      txt(g, "n-chip", c.x + 12, c.y + 44, "×" + cSlots + " slots · ir " +
+        trimZero(M.db.caps.compute.issue_ratio || 0.1) + " · " +
+        (M.db.caps.compute.ingress || "fifo"));
+      c.cyl = cylinder(g, c.x + 14, c.y + 58, 48, 112, "queue");
+      var ns = clamp(cSlots, 1, 6);   // one bar per real slot (up to 6)
+      txt(g, "n-sub", c.x + 78, c.y + 66, "slots");
+      c.bars = slotRow(g, c.x + 78, c.y + 74, ns,
+        slotW(cw - 78 - 10, ns, 3), 3, 96);
       c.servedTxt = txt(g, "n-val", c.x + 12, c.y + ch - 12, "served 0");
       titleOf(g, c.name + " — db query compute node · " + cSlots +
         " slots · " + (M.db.caps.compute.ingress || "fifo") + " ingress · issue ratio " +
@@ -280,8 +328,8 @@
         (M.db.caps.compute.phase_split || "three_phase"));
     });
 
-    var sw = M.db.storage.length === 1 ? 190 : 128, sh = 230;
-    var sy0 = cy0 + ch + 90;
+    var sw = M.db.storage.length === 1 ? 190 : 128, sh = 210;
+    var sy0 = cy0 + ch + 84;
     var sstep = M.db.storage.length > 1
       ? (dbW - 72 - sw) / (M.db.storage.length - 1) : 0;
     var sp = M.db.caps.storage || {};
@@ -294,12 +342,15 @@
       el("rect", { x: s.x, y: s.y, width: sw, height: sh, rx: 10, fill: "#151d2a",
         stroke: "#232c3b" }, g);
       txt(g, "n-title", s.x + 12, s.y + 26, s.name);
-      txt(g, "n-sub", s.x + sw - 12, s.y + 26, M.db.backend, "end");
-      s.cyl = cylinder(g, s.x + 16, s.y + 44, 50, 120, M.db.backend + " queue");
-      txt(g, "n-sub", s.x + 82, s.y + 56, "service");
-      s.bars = slotRow(g, s.x + 82, s.y + 66, 4, Math.max(6, (sw - 100) / 4 - 4), 4, 98);
-      txt(g, "n-sub", s.x + 12, s.y + sh - 28, capTxt);
-      s.busyTxt = txt(g, "n-val", s.x + 12, s.y + sh - 12, "idle");
+      editAff(g, s.x + sw - 15, s.y + 23, "storage",
+        "edit storage nodes: backend preset · ceilings");
+      txt(g, "n-chip", s.x + 12, s.y + 44, M.db.backend);   // own line, lowercase
+      s.cyl = cylinder(g, s.x + 14, s.y + 56, 48, 92, "queue");
+      txt(g, "n-sub", s.x + 78, s.y + 64, "service");
+      s.bars = slotRow(g, s.x + 78, s.y + 72, 4,
+        slotW(sw - 78 - 10, 4, 3), 3, 84);
+      s.busyTxt = txt(g, "n-val", s.x + 12, s.y + 178, "idle");
+      txt(g, "n-sub", s.x + 12, s.y + sh - 12, capTxt);
       titleOf(g, s.name + " — " + M.db.backend + " storage node · " +
         (sp.base_latency !== undefined ? "base lat " + sp.base_latency +
           " · per-GB " + sp.per_gb_time + " · " : "") + capTxt +
@@ -484,12 +535,15 @@
   /* ------------------------------------------------------------------ */
   /* wave panel: every level signal (queue_depth / slot_busy / conn_busy  */
   /* / staging level) folds into a live d3-wave waveform from the SAME    */
-  /* SSE rows the scene plays — works identically for live runs and        */
-  /* replay, because replay streams the full row log through applyRow.     */
+  /* SSE rows the scene plays. The panel is an OSCILLOSCOPE: it shows the */
+  /* window [playhead − W, playhead] and scrolls as the clock advances,   */
+  /* so replay never reads as a frozen plot even while values plateau.     */
   /* ------------------------------------------------------------------ */
   var WV = { by: {}, order: [], dirty: false, open: true, lastRender: 0 };
   window.__wave = WV; // wave-panel fold state (verification hook)
-  var WAVE_THROTTLE_MS = 900;
+  var WAVE_THROTTLE_MS = 900;   // idle/live-row cadence
+  var WAVE_LIVE_MS = 160;       // scroll cadence while the clock is running
+  var WAVE_WIN_MIN = 10, WAVE_WIN_MAX = 30;  // window width in sim-seconds
 
   function waveLabel(comp, leaf) {
     var c = shortName(comp)
@@ -528,6 +582,47 @@
     return null;             // builds referenced it as window.d3wave — accept both
   }
 
+  /* Visible wave window: last ~W sim-seconds ending at the playhead. */
+  function waveWindow() {
+    var t1 = S.cursor === null ? (S.lastT || 0) : S.cursor;
+    var win = clamp(t1, WAVE_WIN_MIN, WAVE_WIN_MAX);
+    if (t1 < WAVE_WIN_MIN) win = Math.max(t1, 1);   // early growth phase
+    var t0 = Math.max(0, t1 - win);
+    return { t0: t0, t1: Math.max(t1, t0 + 1), w: win };
+  }
+
+  /* Clip a signal's plateau rows to [t0, t1] and shift to window-relative
+   * time so the graph scrolls left as the playhead advances. The active
+   * value entering the window from the left is carried in as a synthetic
+   * segment; the newest plateau always extends to the playhead. */
+  function waveWindowData(sig, t0, t1) {
+    var rows = sig.rows, data = [];
+    function seg(tStart, tEnd, v) {
+      var s = Math.max(tStart, t0), e = Math.min(tEnd, t1);
+      if (e <= s) return;
+      var val = sig.isReal ? Math.round(v * 100) / 100 : Math.round(v);
+      data.push([(s - t0) * TS12, String(val), (e - s) * TS12]);
+    }
+    var i = 0;
+    while (i < rows.length && rows[i].t <= t0) i++;
+    if (i > 0)  seg(t0, i < rows.length ? rows[i].t : t1, rows[i - 1].value);
+    for (var k = i; k < rows.length; k++) {
+      if (rows[k].t >= t1) break;
+      var nx = (k + 1 < rows.length) ? rows[k + 1].t : t1;
+      seg(rows[k].t, nx, rows[k].value);
+    }
+    if (!data.length) data.push([0, "\u00b7", Math.max((t1 - t0) * TS12, 1)]);
+    return data;
+  }
+
+  var TS12 = 1e12;   // d3-wave labels axis ticks in ps quanta; sim t is s
+
+  function waveTotalEdges() {
+    var n = 0;
+    WV.order.forEach(function (nm) { n += WV.by[nm].rows.length; });
+    return n;
+  }
+
   function renderWave() {
     var host = $("livewave");
     if (!host) return;
@@ -536,32 +631,17 @@
     WV.lastRender = performance.now();
     var wgf = waveGraphFn();
     if (!wgf) {
-      waveState("vendor JS missing (d3 / d3-wave)");
+      waveState("vendor JS missing (d / d3-wave)");
       return;
     }
     if (!WV.order.length) { waveState("no level signals streamed yet"); return; }
-    var tMax = 0, pts = 0;
-    WV.order.forEach(function (n) {
-      var rows = WV.by[n].rows;
-      pts += rows.length;
-      if (rows.length) tMax = Math.max(tMax, rows[rows.length - 1].t);
-    });
-    tMax = Math.max(tMax, S.cursor || 0, 1);     // >=1: d3 zoom-extent guard
+    var win = waveWindow();
     // this d3-wave build renders arbitrary level values through its enum row:
     // every plateau is a box labelled with the value — ideal for queue-depth
     // and occupancy waveforms. Root is a collapsible 'label' group.
-    // d3-wave labels axis ticks assuming VCD timescale quanta (ps base);
-    // sim time is seconds — scale by 1e12 so its unit ladder labels "s".
-    var TS = 1e12;
     var children = WV.order.map(function (name) {
-      var sig = WV.by[name];
-      var rows = sig.rows;
-      var data = rows.map(function (r, i) {
-        var nextT = (i + 1 < rows.length) ? rows[i + 1].t : tMax;
-        var v = sig.isReal ? Math.round(r.value * 100) / 100 : Math.round(r.value);
-        return [r.t * TS, String(v), Math.max((nextT - r.t) * TS, 0)];
-      });
-      return { name: name, type: { name: "enum" }, data: data };
+      return { name: name, type: { name: "enum" },
+        data: waveWindowData(WV.by[name], win.t0, win.t1) };
     });
     var w = Math.max(host.clientWidth - 8, 320);
     var h = (children.length + 1) * 25 + 56;     // row 20 + ypadding 5 per signal
@@ -571,14 +651,22 @@
       .style("width", w + "px").style("height", h + "px");
     try {
       var wg = new wgf(svg);
-      wg.bindData({ name: "queue signals", type: { name: "label" },
+      wg.bindData({ name: "queue signals · window " + win.t0.toFixed(1) +
+        "–" + win.t1.toFixed(1) + "s", type: { name: "label" },
         children: children });
     } catch (e) {
       waveState("wave render failed: " + e);
       return;
     }
-    waveState(WV.order.length + " queue signals · " + pts + " samples · t≤" +
-      tMax.toFixed(2) + (S.playing ? " · streaming" : " · final"));
+    var inWin = 0;
+    WV.order.forEach(function (nm) {
+      inWin += WV.by[nm].rows.filter(function (r) {
+        return r.t > win.t0 - 1e-9 && r.t <= win.t1 + 1e-9;
+      }).length;
+    });
+    waveState("win t " + win.t0.toFixed(1) + "–" + win.t1.toFixed(1) +
+      " · " + WV.order.length + " signals · " + inWin + " edges in window · " +
+      waveTotalEdges() + " total" + (S.playing ? " · scrolling" : " · final"));
   }
 
   function resetWave() {
@@ -597,9 +685,9 @@
   function spawnDot(linkId, color) {
     if (!SC || !SC.links[linkId]) return;
     var path = SC.links[linkId].path;
-    // never shorter than the minimum travel: fast-churn runs must show
-    // continuous traffic, not one-frame blinks between screenshots
-    var dur = Math.max(DOT_MIN_MS, 1600 / S.speed);
+    // never shorter than the minimum travel: fast-churn runs (and AUTO-pace
+    // replays) must show continuous traffic, not one-frame blinks
+    var dur = Math.max(DOT_MIN_MS, 1600 / (S.rate || S.speed));
     var live = 0;
     for (var i = 0; i < S.dots.length; i++)
       if (S.dots[i].link === linkId) live++;
@@ -626,13 +714,26 @@
   /* playback loop                                                       */
   /* ------------------------------------------------------------------ */
   var lastFrame = 0, rafId = null;
+
+  /* AUTO pace: a replay rate that renders the whole run — from t=0 to the
+     stream frontier / configured until — in ~PACE_TARGET s wall. The run's
+     engine finishes in ~1 s, so without this the page would crawl the
+     prefill dead zone at 1x (10+ s of sim-time with zero completions) and
+     read as frozen. Speed buttons override manually; max is untouched. */
+  function effRate() {
+    if (S.pace !== "auto") return S.speed;
+    var frontier = Math.max(S.lastT, S.paceHint * PACE_TARGET, S.cursor || 0);
+    return clamp(frontier / PACE_TARGET, 1, 999);
+  }
+
   function frame(now) {
     rafId = null;
     if (!S.playing) return;
     var dt = Math.min((now - lastFrame) / 1000, 0.25); lastFrame = now;
+    S.rate = effRate();
     if (S.cursor === null && S.queue.length) S.cursor = S.queue[0][0];
     if (S.cursor !== null) {
-      var target = S.cursor + dt * S.speed;
+      var target = S.cursor + dt * S.rate;
       if (target > S.lastT) target = S.lastT;
       while (S.qi < S.queue.length && S.queue[S.qi][0] <= target) applyRow(S.queue[S.qi++]);
       S.cursor = target;
@@ -671,7 +772,7 @@
     // configured aggregate tok/s so the HUD moves continuously on playback
     // even when events only bill at service boundaries (see header note).
     var c = S.counters;
-    var simDt = dt * S.speed;
+    var simDt = dt * (S.rate || S.speed);
     var din = c.in_pending > 0
       ? Math.min(c.in_pending, (M.rates.in > 0 ? M.rates.in * simDt : c.in_pending))
       : 0;
@@ -684,6 +785,16 @@
       "req " + Math.round(M.llm.requests || 0) + " · served " + Math.round(M.llm.served || 0);
     if (M.llm.counterTxt) M.llm.counterTxt.textContent =
       "in " + Math.round(c.in_disp) + " · out " + Math.round(c.out_disp);
+    // honest prefill-phase line: while nothing has completed yet but tokens
+    // ARE being billed, say so + the config-computable ETA (no fake movement)
+    if (M.llm.phaseTxt) {
+      var eta = M.llm.firstEta;
+      var served0 = Math.round(M.llm.served || 0) === 0;
+      var billing = c.in_auth > 0 || M.llm.queueTarget > 0;
+      M.llm.phaseTxt.textContent = (eta && served0 && billing)
+        ? "prefill phase · first completion expected \u2248 t " + Math.round(eta)
+        : "";
+    }
     M.db.compute.forEach(function (cc) {
       if (cc.servedTxt) cc.servedTxt.textContent = "served " + Math.round(cc.served || 0);
     });
@@ -708,7 +819,23 @@
     $("clock").textContent = S.cursor === null ? "0.00" : S.cursor.toFixed(2);
     if (S.until > 0)
       $("bar").style.width = (clamp(S.cursor || 0, 0, S.until) / S.until * 100).toFixed(1) + "%";
-    if (WV.dirty && WV.open && now - WV.lastRender > WAVE_THROTTLE_MS) renderWave();
+    // the wave panel is a scrolling oscilloscope: while the clock runs it
+    // must REDRAW on a cadence even when no level VALUE changed (plateaus
+    // still slide left with the playhead)
+    if (WV.open && (WV.dirty || S.playing) &&
+        now - WV.lastRender > (S.playing ? WAVE_LIVE_MS : WAVE_THROTTLE_MS)) {
+      renderWave();
+    }
+    paintPaceUI();
+  }
+
+  /* keep the AUTO speed button honest about the effective replay rate */
+  function paintPaceUI() {
+    var b = document.querySelector('#speed button[data-s="auto"]');
+    if (!b) return;
+    var lbl = "auto \u00d7" + ((S.rate || 1) >= 10 ? Math.round(S.rate || 1)
+      : (S.rate || 1).toFixed(1));
+    if (b.textContent !== lbl) b.textContent = lbl;
   }
 
   function freezeAtEnd() {
@@ -778,6 +905,170 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* per-component ✎ editor: click a card's pencil, tweak THAT           */
+  /* component's editable params inline, and RE-LAUNCH. The form renders */
+  /* from the server's editor schema (init payload), so every field maps */
+  /* to a validated OVERRIDABLE dotted path; edits merge on top of the   */
+  /* previous overrides (base YAML + overrides — same /live/run path as  */
+  /* the sidebar form). The sidebar general form is untouched.           */
+  /* ------------------------------------------------------------------ */
+  function closeEditor() {
+    var host = $("compedit");
+    if (host) {
+      host.classList.add("hidden");
+      while (host.firstChild) host.removeChild(host.firstChild);
+    }
+  }
+
+  function cfgGet(path) {            // read a dotted path off the display cfg
+    var v = S.cfg;
+    if (!v) return null;
+    var segs = path.split(".");
+    for (var i = 0; i < segs.length; i++) {
+      if (v === null || typeof v !== "object") return null;
+      v = v[segs[i]];
+    }
+    return v === undefined ? null : v;
+  }
+
+  function ceMsg(host, text, cls) {
+    var m = host.querySelector(".ce-msg");
+    if (m) {
+      m.textContent = text || "";
+      m.className = "ce-msg" + (cls ? " " + cls : "");
+    }
+  }
+
+  function openEditor(comp) {
+    if (!S.editors || !S.cfg) return;
+    var spec = null;
+    S.editors.forEach(function (e) { if (e.component === comp) spec = e; });
+    if (!spec) return;
+    var host = $("compedit");
+    if (!host) return;
+    closeEditor();
+    host.classList.remove("hidden");
+
+    function div(cls, text, parent) {
+      var d = document.createElement(cls === "button" ? "button" : "div");
+      if (cls !== "button") d.className = cls;
+      if (text !== undefined) d.textContent = text;
+      (parent || host).appendChild(d);
+      return d;
+    }
+    var head = div("ce-head");
+    head.textContent = "\u270E " + spec.title;
+    var x = document.createElement("button");
+    x.className = "ce-x"; x.type = "button"; x.textContent = "✕";
+    x.addEventListener("click", closeEditor);
+    head.appendChild(x);
+    div("ce-sub", "relaunches " + (S.scenario || "(no scenario)") +
+      " with dotted-path overrides on top of the base", host);
+
+    var inputs = {};
+    spec.fields.forEach(function (f, n) {
+      var cur = cfgGet(f.where || f.path);
+      var row = div("ce-fld");
+      var lab = document.createElement("span");
+      lab.textContent = f.label;
+      row.appendChild(lab);
+      if (f.readonly) {                 // ceilings follow the preset — label
+        var v = document.createElement("em");
+        v.textContent = cur === null || cur === undefined ? "—" : String(cur);
+        row.appendChild(v);
+        return;
+      }
+      var input;
+      if (f.kind === "choice" && f.options && f.options.length) {
+        input = document.createElement("select");
+        var seen = {};
+        f.options.concat(cur && f.options.indexOf(cur) < 0 ? [String(cur)] : [])
+          .forEach(function (o) {
+            if (seen[o]) return; seen[o] = 1;
+            var op = document.createElement("option");
+            op.value = o; op.textContent = o;
+            input.appendChild(op);
+          });
+        if (cur !== null) input.value = String(cur);
+      } else {
+        input = document.createElement("input");
+        input.type = "number";
+        if (f.kind === "int") input.step = "1";
+        if (f.kind === "weight" || f.kind === "ratio") {
+          input.step = "0.05"; input.min = "0"; input.max = "1";
+        }
+        if (cur !== null && typeof cur === "number") input.value = String(cur);
+        input.placeholder = cur === null ? "—" : String(cur);
+      }
+      input.id = "ce-f" + n;
+      row.appendChild(input);
+      inputs[f.path] = { el: input, kind: f.kind, cur: cur };
+    });
+
+    var msg = div("ce-msg");
+    var acts = div("ce-acts");
+    var go = document.createElement("button");
+    go.className = "ce-go"; go.type = "button";
+    go.textContent = "⟳ re-launch with changes";
+    var cancel = document.createElement("button");
+    cancel.className = "ce-cancel"; cancel.type = "button";
+    cancel.textContent = "cancel";
+    cancel.addEventListener("click", closeEditor);
+    acts.appendChild(go); acts.appendChild(cancel);
+
+    go.addEventListener("click", function () {
+      var changed = {};
+      Object.keys(inputs).forEach(function (path) {
+        var it = inputs[path];
+        var raw = (it.el.value || "").trim();
+        if (raw === "") return;                       // left alone
+        if (it.kind === "choice") {
+          if (String(it.cur) === raw) return;
+        } else if (it.cur !== null && +raw === +it.cur) {
+          return;                                      // numerically unchanged
+        }
+        changed[path] = raw;
+      });
+      if (!S.scenario) {
+        ceMsg(host, "no scenario on the current run to relaunch", "");
+        return;
+      }
+      if (!Object.keys(changed).length) {
+        ceMsg(host, "nothing changed — edit a value first", "");
+        return;
+      }
+      var merged = {};
+      Object.keys(S.overrides || {}).forEach(function (k) {
+        merged[k] = S.overrides[k];
+      });
+      Object.keys(changed).forEach(function (k) { merged[k] = changed[k]; });
+      go.disabled = true;
+      ceMsg(host, "re-launching…", "ok");
+      fetch("/live/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scenario: S.scenario, overrides: merged }),
+      }).then(function (r) {
+        return r.json().then(function (j) { return { code: r.status, j: j }; });
+      }).then(function (res) {
+        go.disabled = false;
+        if (res.code === 202) {
+          setLaunch("sending", "re-launched " + (res.j.run_id || "run") +
+            " with component edits · adopting stream…");
+          if (es) { es.close(); es = null; }
+          connectStream();
+          closeEditor();
+        } else {
+          ceMsg(host, (res.j && res.j.detail) || ("HTTP " + res.code), "");
+        }
+      }).catch(function (err) {
+        go.disabled = false;
+        ceMsg(host, "relaunch failed: " + err, "");
+      });
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
   /* SSE                                                                 */
   /* ------------------------------------------------------------------ */
   var es = null;
@@ -801,6 +1092,12 @@
     // every init (fresh connect, run switch, EventSource reconnect replays
     // from row 0) reseats the scene from *this* run's resolved config
     S.runId = d.run_id; S.until = d.until || 0; S.status = d.status || "running";
+    S.scenario = d.scenario || null;
+    S.overrides = d.overrides || {};
+    S.editors = d.editors || [];       // per-component ✎ editor schema
+    S.paceHint = d.pace || 1;          // AUTO replay pace (server-side truth)
+    S.cfg = d.config || null;          // current values the editor prefills
+    closeEditor();
     setExport(d.run_id);
     resetPlayback();
     M = buildModel(d.config);
@@ -1005,7 +1302,14 @@
 
   $("speed").addEventListener("click", function (ev) {
     var b = ev.target.closest("button"); if (!b) return;
-    S.speed = +b.getAttribute("data-s");
+    var s = b.getAttribute("data-s");
+    if (s === "auto") {
+      S.pace = "auto";                 // AUTO: rate from the server pace hint
+    } else {
+      S.pace = "manual";               // manual override of the AUTO pace
+      S.speed = +s;
+      S.rate = +s;
+    }
     [].forEach.call($("speed").children, function (c) { c.classList.remove("on"); });
     b.classList.add("on");
   });

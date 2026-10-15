@@ -346,17 +346,32 @@ links glow while transfers are in flight.
 
 The view streams the live run's `metrics.db` sample rows over
 `GET /live/stream` (SSE `init → delta → done`) and plays them back on its
-own sim-clock — pick **1×…max** playback speed; the clock keeps running
-while the simulation writes rows, and the frame freezes on the final state
-when the run ends.
+own sim-clock. Playback defaults to **AUTO pace**: the engine typically
+finishes a 120-unit run in ~1 wall-second, so the page picks a replay rate
+(`until / 30`) that renders the whole run in ~30 s instead of crawling at
+1× through prefill dead zones — the **1×…max** buttons are manual
+overrides. The clock keeps running while the simulation writes rows, the
+bottom waveform panel shows a window of the last ~30 sim-seconds that
+scrolls with the playhead, and the frame freezes on the final state when
+the run ends. While a heavy-prefill phase serves nothing, the LLM card says
+so honestly: "prefill phase · first completion expected ≈ t N", computed
+from the config's token draws, rates and slot concurrency.
 
 The left panel **launches a run without leaving the browser**: pick a
 scenario (every runnable scenario under `scenarios/` is listed), optionally
 override `agents.count`, `llm.slots` / token rates, `db.topology`,
 `db.storage.backend`, compute/storage node counts and `sim.until`, then hit
-*launch*. The run executes as a subprocess into `runs/live/<run_id>/` and is
-animated live; a second concurrent launch is rejected (HTTP 409) until the
-first finishes. When it completes, the panel links to the run's rendered
+*launch*. Each scene component (agent pool, `llm.server`, a compute node, a
+storage node) also carries a **✎** affordance: click it to edit *that*
+component's parameters inline (LLM slots / in-out tok/s / ingress, compute
+slots / ingress / issue ratio, storage backend preset — ceilings are
+read-only labels derived from it, agent count + first-step weights) and
+press *re-launch with changes*: the edits ride as dotted-path overrides on
+top of the scenario base through the same `POST /live/run` merge, and the
+scene rebuilds with the new config. The run executes as a subprocess into
+`runs/live/<run_id>/` and is animated live; a second concurrent launch is
+rejected (HTTP 409) until the first finishes. When it completes, the panel
+links to the run's rendered
 report (`/live/run/<id>/report` — the usual full pipeline lands in the run
 dir: `metrics.db`, `run.vcd`, `report.html`, `summary.json`) and its raw
 VCD. The header's amber **EXPORT** button (and the DONE panel's zip link)

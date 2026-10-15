@@ -28,22 +28,156 @@ from typing import Any, Dict, List, Optional
 
 from omegaconf import OmegaConf
 
-__all__ = ["LiveManager", "LiveBusy", "LiveError", "SamplesTail", "zip_run_dir"]
+__all__ = [
+    "LiveManager",
+    "LiveBusy",
+    "LiveError",
+    "SamplesTail",
+    "zip_run_dir",
+    "editor_schema",
+    "suggest_replay_rate",
+]
 
-#: form-reachable config keys (dotted OmegaConf paths) with coercion
+#: form- and component-editor-reachable config keys (dotted OmegaConf paths)
+#: with coercion kinds: int > 0, float > 0, ratio/weight in [0, 1],
+#: choice (non-empty string), ingress (none | fifo | priority:<key>), str.
 OVERRIDABLE: Dict[str, str] = {
     "agents.count": "int",
+    "agents.initial_step.llm": "weight",
+    "agents.initial_step.db": "weight",
     "llm.slots": "int",
     "llm.input_tokens_per_s": "float",
     "llm.output_tokens_per_s": "float",
+    "llm.ingress": "ingress",
     "db.topology": "choice",
     "db.storage.backend": "str",
+    "db.storage.overrides.base_latency": "float",
+    "db.storage.overrides.per_gb_time": "float",
+    "db.storage.overrides.iops_ceiling": "float",
+    "db.storage.overrides.bandwidth_ceiling": "float",
     "db.compute_nodes": "int",
     "db.storage_nodes": "int",
+    "db.compute.slots": "int",
+    "db.compute.ingress": "ingress",
+    "db.compute.issue_ratio": "ratio",
     "sim.until": "float",
 }
 TOPOLOGIES = ("centralized", "disaggregated", "distributed")
-BACKENDS = ("ram", "nvme", "ssd", "disk")
+BACKENDS = ("ram", "nvme", "ssd", "disk")  # static floor; registry extends it
+INGRESS_KINDS = ("none", "fifo")  # "priority" needs a request-key path
+
+#: AUTO replay pace: the page aims to render the whole run in roughly this
+#: many wall seconds (a ~120u run then plays at ~4x instead of crawling at
+#: 1x through prefill dead zones). Speed buttons stay manual overrides.
+PACE_TARGET_SECONDS = 30.0
+
+
+def backend_names() -> List[str]:
+    """Known storage backends: the static list plus everything the actual
+    preset registry ships (``ssd_enterprise`` & friends are valid scenario
+    values the override path must accept)."""
+    out = list(BACKENDS)
+    try:
+        from agent_db_sim.components.db.backend import STORAGE_BACKEND_REGISTRY
+
+        for name in sorted(STORAGE_BACKEND_REGISTRY):
+            if name not in out:
+                out.append(name)
+    except Exception:
+        pass
+    return out
+
+
+def suggest_replay_rate(until: float) -> float:
+    """AUTO pace for a run of ``until`` sim-seconds: a rate so playback
+    lasts ~PACE_TARGET_SECONDS wall (never below 1x, so short runs are not
+    artificially slowed)."""
+    until = float(until or 0.0)
+    if until <= 0:
+        return 1.0
+    return max(1.0, round(until / PACE_TARGET_SECONDS, 2))
+
+
+def _field(path: str, label: str, kind: str, **extra: Any) -> Dict[str, Any]:
+    """One editor field; the dotted ``path`` doubles as the override key the
+    RE-LAUNCH button sends to ``POST /live/run`` (validated by OVERRIDABLE).
+    ``where`` tells the front end to read the field's CURRENT value from the
+    resolved display config instead of the flat path (compute/storage fields
+    live under renamed sections there). ``readonly`` renders the value as a
+    label only (storage ceilings derive from the backend preset, so the
+    editor exposes the preset and keeps them informational)."""
+    out: Dict[str, Any] = {"path": path, "label": label, "kind": kind}
+    out.update(extra)
+    return out
+
+
+def editor_schema() -> List[Dict[str, Any]]:
+    """Per-component edit-form definitions: one entry per editable component
+    (agent pool / llm / compute nodes / storage nodes) listing its fields.
+    The front end renders the inline editor from this payload, so the
+    editor -> override mapping has exactly one source of truth server-side
+    (and every emitted override key is validated against ``OVERRIDABLE``)."""
+    return [
+        {
+            "component": "agents",
+            "title": "agent pool",
+            "fields": [
+                _field("agents.count", "agents", "int"),
+                _field("agents.initial_step.llm", "first step · llm weight",
+                       "weight"),
+                _field("agents.initial_step.db", "first step · db weight",
+                       "weight"),
+            ],
+        },
+        {
+            "component": "llm",
+            "title": "llm.server",
+            "fields": [
+                _field("llm.slots", "slots", "int"),
+                _field("llm.input_tokens_per_s", "input tok/s", "float"),
+                _field("llm.output_tokens_per_s", "output tok/s", "float"),
+                _field("llm.ingress", "ingress", "choice",
+                       options=list(INGRESS_KINDS)),
+            ],
+        },
+        {
+            "component": "compute",
+            "title": "db compute nodes (shared config)",
+            "fields": [
+                _field("db.compute.slots", "slots / node", "int",
+                       where="db.compute.slots"),
+                _field("db.compute.ingress", "ingress", "choice",
+                       options=list(INGRESS_KINDS),
+                       where="db.compute.ingress"),
+                _field("db.compute.issue_ratio", "issue ratio", "ratio",
+                       where="db.compute.issue_ratio"),
+            ],
+        },
+        {
+            "component": "storage",
+            "title": "db storage nodes",
+            "fields": [
+                # ONE editable param: the preset. Ceilings follow from it via
+                # resolve_backend_params() server-side and show as read-only
+                # labels (they still ride OVERRIDABLE for API power users).
+                _field("db.storage.backend", "backend preset", "choice",
+                       options=backend_names()),
+                _field("db.storage.overrides.base_latency",
+                       "base latency s", "float",
+                       where="db.storage.base_latency", readonly=True),
+                _field("db.storage.overrides.per_gb_time",
+                       "per-GB time s", "float",
+                       where="db.storage.per_gb_time", readonly=True),
+                _field("db.storage.overrides.iops_ceiling",
+                       "IOPS ceiling", "float",
+                       where="db.storage.iops_ceiling", readonly=True),
+                _field("db.storage.overrides.bandwidth_ceiling",
+                       "bandwidth GB/s", "float",
+                       where="db.storage.bandwidth_ceiling", readonly=True),
+            ],
+        },
+    ]
+
 
 LIVE_DIR_NAME = "live"
 #: safety cap on rows delivered by one delta poll
@@ -70,7 +204,15 @@ def _coerce(kind: str, key: str, raw: Any) -> Any:
             if v <= 0:
                 raise ValueError
             return v
+        if kind in ("weight", "ratio"):
+            v = float(raw)
+            if not 0.0 <= v <= 1.0:
+                raise ValueError
+            return v
         v = str(raw)
+        if kind == "ingress":
+            _validate_ingress(key, v)
+            return v
         if kind == "choice":
             if "." not in key or not v:
                 raise ValueError
@@ -78,6 +220,18 @@ def _coerce(kind: str, key: str, raw: Any) -> Any:
         return v
     except (TypeError, ValueError) as exc:
         raise LiveError(f"invalid value for {key!r}: {raw!r}") from exc
+
+
+def _validate_ingress(key: str, v: str) -> None:
+    """Ingress overrides accept ``none | fifo | priority:<dotted-key>`` (the
+    editor form offers none/fifo; a priority spec passed by API is validated
+    structurally, not against request attributes)."""
+    kind, sep, sub = v.partition(":")
+    if (kind in INGRESS_KINDS and not sep) or (kind == "priority" and sep and sub):
+        return
+    raise LiveError(
+        f"unknown ingress {v!r} for {key!r}; pick one of {INGRESS_KINDS}"
+    )
 
 
 def _worker(cfg: Any, run_dir: str) -> None:  # pragma: no cover - subprocess
@@ -188,6 +342,12 @@ class LiveState:
             "overrides": self.overrides,
             "config": self.config,
             "until": self.until,
+            # AUTO replay pace + per-component editor definitions: the page
+            # renders ✎-editors and its default replay rate from these, so
+            # the editor -> override-key mapping lives server-side.
+            "pace": suggest_replay_rate(self.until),
+            "pace_target_s": PACE_TARGET_SECONDS,
+            "editors": editor_schema(),
             "error": self.error,
             "t_last": round(self.latest_t, 3),
             "elapsed": round(
@@ -329,10 +489,26 @@ class LiveManager:
                 if value not in TOPOLOGIES:
                     raise LiveError(f"unknown topology {value!r}; pick one of {TOPOLOGIES}")
             if key == "db.storage.backend":
-                if value not in BACKENDS:
-                    raise LiveError(f"unknown backend {value!r}; pick one of {BACKENDS}")
+                names = backend_names()
+                if value not in names:
+                    raise LiveError(f"unknown backend {value!r}; pick one of {names}")
             OmegaConf.update(cfg, key, value, merge=True)
+        self._check_initial_step(cfg)
         return cfg
+
+    @staticmethod
+    def _check_initial_step(cfg: Any) -> None:
+        """`agents.initial_step` weights must sum to 1 (the same rule the
+        agent client enforces) — reject at LAUNCH time, not mid-run."""
+        spec = _safe_select(cfg, "agents.initial_step")
+        if spec is None:
+            return
+        try:
+            from agent_db_sim.components.agent_client import parse_initial_step
+
+            parse_initial_step(OmegaConf.to_container(spec, resolve=True))
+        except Exception as exc:
+            raise LiveError(f"agents.initial_step: {exc}") from exc
 
     def _scenario_path(self, scenario: str) -> Path:
         if self.scenarios_root is None:
@@ -362,6 +538,86 @@ def _safe_select(cfg: Any, key: str) -> Any:
         return OmegaConf.select(cfg, key)
     except Exception:
         return None
+
+
+def _expected_tokens(spec: Any) -> Optional[float]:
+    """Mean of a token-count draw (any TOKEN_DISTRIBUTIONS form, or a bare
+    number); ``None`` when the spec isn't a recognisable distribution."""
+    if spec is None:
+        return None
+    try:
+        if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+            return float(spec)
+        try:
+            d = OmegaConf.to_container(spec, resolve=True)
+        except Exception:
+            d = spec
+        if not isinstance(d, Mapping):
+            return None
+        dist = str(d.get("distribution", "fixed"))
+        if dist == "fixed":
+            return float(d["value"])
+        if dist == "uniform":
+            return (float(d["low"]) + float(d["high"])) / 2.0
+        if dist == "geometric":
+            p = float(d["p"])
+            return 1.0 / p if p > 0 else None
+        if dist == "exponential":
+            return 1.0 / float(d["rate"])
+        if dist == "gamma":
+            return float(d["shape"]) * float(d["scale"])
+        if dist == "normal":
+            return float(d["mean"])
+        if dist == "lognormal":
+            import math
+
+            return math.exp(float(d["mean"]) + float(d["sigma"]) ** 2 / 2.0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _expected_sigma(cfg: Any, key: str) -> float:
+    """sigma of a lognormal token spec (0 for fixed/other distributions)."""
+    spec = _safe_select(cfg, key)
+    try:
+        d = OmegaConf.to_container(spec, resolve=True)
+        if isinstance(d, Mapping) and str(d.get("distribution")) == "lognormal":
+            return float(d.get("sigma", 0.0) or 0.0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _first_completion_eta(cfg: Any, sel: Any) -> Optional[float]:
+    """Expected sim-time of the FIRST LLM completion, from config alone —
+    the same cost model the endpoint runs: ``k = min(agents, slots)``
+    requests hold slots from t=0 and share the aggregate token cap
+    ``in_rate + out_rate`` (fair share: each earns cap/k), on top of the
+    per-request phase floor ``in/in_rate + out/out_rate``. The *first*
+    completion is the fastest of the k, so the draws are order-statistic
+    adjusted (lognormal mean shifted by ``exp(-sigma*sqrt(2 ln k))``).
+    Cross-checked against observed runs: grounded_70b at 4 slots / 24
+    agents predicts ~11 (observed ~11); at 32 slots it predicts ~40
+    (observed 48). The view shows this during a heavy-prefill phase so a
+    quiet scene reads as honest queueing, not a frozen page."""
+    import math
+
+    e_in = _expected_tokens(_safe_select(cfg, "agents.input_tokens"))
+    e_out = _expected_tokens(_safe_select(cfg, "agents.output_tokens"))
+    in_rate = float(sel("llm.input_tokens_per_s", 0.0) or 0.0)
+    out_rate = float(sel("llm.output_tokens_per_s", 0.0) or 0.0)
+    if e_in is None or e_out is None or in_rate <= 0 or out_rate <= 0:
+        return None
+    k = max(1, min(int(sel("agents.count", 1)), int(sel("llm.slots", 1))))
+    z = math.sqrt(2.0 * math.log(k))
+    adj_in = math.exp(-z * _expected_sigma(cfg, "agents.input_tokens"))
+    adj_out = math.exp(-z * _expected_sigma(cfg, "agents.output_tokens"))
+    head_in, head_out = e_in * adj_in, e_out * adj_out
+    floor = head_in / in_rate + head_out / out_rate       # phase floor
+    cap = (head_in + head_out) * k / (in_rate + out_rate)  # fair share
+    eta = max(floor, cap)
+    return round(eta, 1) if eta > 0 else None
 
 
 def _display_cfg(cfg: Any) -> Dict[str, Any]:
@@ -422,13 +678,25 @@ def _display_cfg(cfg: Any) -> Dict[str, Any]:
         pass
 
     topology = str(sel("db.topology", "centralized"))
+    init_step = _safe_select(cfg, "agents.initial_step")
+    try:
+        init_step_c = (
+            OmegaConf.to_container(init_step, resolve=True)
+            if init_step is not None else None
+        )
+    except Exception:
+        init_step_c = None
     return {
-        "agents": {"count": int(sel("agents.count", 1))},
+        "agents": {
+            "count": int(sel("agents.count", 1)),
+            "initial_step": init_step_c if isinstance(init_step_c, Mapping) else None,
+        },
         "llm": {
             "slots": int(sel("llm.slots", 1)),
             "input_tokens_per_s": float(sel("llm.input_tokens_per_s", 0.0) or 0.0),
             "output_tokens_per_s": float(sel("llm.output_tokens_per_s", 0.0) or 0.0),
             "ingress": str(sel("llm.ingress", "fifo")),
+            "first_completion_eta": _first_completion_eta(cfg, sel),
         },
         "db": {
             "topology": topology,

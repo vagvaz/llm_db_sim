@@ -329,6 +329,8 @@ def test_display_cfg_capabilities_sanity_queue() -> None:
         "input_tokens_per_s": 1024.0,
         "output_tokens_per_s": 256.0,
         "ingress": "fifo",
+        # fixed 512 in / 128 out at 1024/256 tok/s -> phase floor 0.5+0.5
+        "first_completion_eta": 1.0,
     }
     db = out["db"]
     assert db["topology"] == "centralized"
@@ -601,3 +603,156 @@ def test_export_unknown_and_traversal_run_ids(tmp_path: Path) -> None:
     assert client.get("/live/export", params={"run_id": "nope"}).status_code == 404
     esc = client.get("/live/export", params={"run_id": "../../etc"})
     assert esc.status_code == 404
+
+
+# --------------------------------------------------------------------- #
+# AUTO replay pace + per-component editor (the "frozen page" + ✎ fixes)  #
+# --------------------------------------------------------------------- #
+
+def test_suggest_replay_rate_targets_pace_window() -> None:
+    """AUTO pace renders a whole run in ~20-40 s wall: the suggested rate
+    for a 120u run plays it in ~30 s; short runs are never slowed below 1x."""
+    from agent_db_sim.viz.live import suggest_replay_rate
+
+    assert suggest_replay_rate(120.0) == 4.0
+    assert 20.0 <= 120.0 / suggest_replay_rate(120.0) <= 40.0
+    assert suggest_replay_rate(600.0) == 20.0
+    assert suggest_replay_rate(5.0) == 1.0          # never slower than 1x
+    assert suggest_replay_rate(0.0) == 1.0
+    assert suggest_replay_rate(None) == 1.0
+
+
+def test_public_state_carries_pace_hint(tmp_path: Path) -> None:
+    """/live/run + /live/state answers carry the AUTO pace so the page can
+    pick its replay rate from the server-side truth (single formula)."""
+    client = TestClient(_app(tmp_path))
+    r = client.post("/live/run", json={
+        "scenario": "sanity/sanity_single.yaml", "overrides": {"sim.until": 90}})
+    assert r.status_code == 202
+    body = r.json()
+    assert body["until"] == 90.0
+    assert body["pace"] == 3.0
+    assert body["pace_target_s"] == 30.0
+    st = _wait_done(client)
+    assert st["pace"] == 3.0                        # same hint on /live/state
+
+
+def test_editor_schema_paths_are_overridable() -> None:
+    """Every ✎-editor field emits a dotted path that /live/run accepts as an
+    override — the editor -> override mapping has one source of truth."""
+    from agent_db_sim.viz.live import OVERRIDABLE, editor_schema
+
+    comps = {c["component"] for c in editor_schema()}
+    assert comps == {"agents", "llm", "compute", "storage"}
+    for comp in editor_schema():
+        for field in comp["fields"]:
+            assert field["path"] in OVERRIDABLE, field["path"]
+            assert field["kind"] in ("int", "float", "choice", "weight",
+                                     "ratio", "ingress", "str")
+    # storage exposes ONLY the backend preset as editable; the ceilings are
+    # read-only labels derived from it (resolve_backend_params server-side)
+    storage = next(c for c in editor_schema() if c["component"] == "storage")
+    editable = [f["path"] for f in storage["fields"] if not f.get("readonly")]
+    assert editable == ["db.storage.backend"]
+    assert "ssd_enterprise" in next(
+        f for f in storage["fields"] if f["path"] == "db.storage.backend"
+    )["options"]
+
+
+def test_editor_override_paths_merge_over_base(tmp_path: Path) -> None:
+    """The per-component editor's dotted paths land on the resolved config
+    ON TOP of the scenario base (same merge the sidebar form uses)."""
+    mgr = LiveManager(tmp_path / "live", SCENARIOS)
+    cfg = mgr._resolve_cfg("profiles/grounded_agent_70b.yaml", {
+        "llm.output_tokens_per_s": "4000",
+        "db.compute.slots": "8",
+        "db.compute.issue_ratio": "0.5",
+        "db.storage.backend": "ssd_enterprise",
+        "db.storage.overrides.iops_ceiling": "123456",
+        "agents.initial_step.llm": "0.6",
+        "agents.initial_step.db": "0.4",
+        "llm.ingress": "fifo",
+    })
+    from omegaconf import OmegaConf as OC
+
+    assert OC.select(cfg, "llm.output_tokens_per_s") == 4000.0
+    assert OC.select(cfg, "db.compute.slots") == 8
+    assert OC.select(cfg, "db.compute.issue_ratio") == 0.5
+    assert OC.select(cfg, "db.storage.backend") == "ssd_enterprise"
+    assert OC.select(cfg, "db.storage.overrides.iops_ceiling") == 123456.0
+    assert OC.select(cfg, "agents.initial_step.llm") == 0.6
+    assert OC.select(cfg, "llm.slots") == 32        # untouched base value
+    # the displayed capabilities + ETA recompute from the merged config
+    from agent_db_sim.viz.live import _display_cfg
+
+    disp = _display_cfg(cfg)
+    assert disp["llm"]["output_tokens_per_s"] == 4000.0
+    assert disp["db"]["storage"]["iops_ceiling"] == 123456.0
+    assert disp["agents"]["initial_step"] == {"llm": 0.6, "db": 0.4}
+    # doubling the out-rate shortens the first-completion ETA
+    base_eta = disp["llm"]["first_completion_eta"]
+    assert base_eta and base_eta > 5
+    assert base_eta < _display_cfg(
+        mgr._resolve_cfg("profiles/grounded_agent_70b.yaml", {})
+    )["llm"]["first_completion_eta"]
+
+
+def test_editor_override_rejections(tmp_path: Path) -> None:
+    """Invalid editor inputs fail at LAUNCH time with 422, not mid-run."""
+    client = TestClient(_app(tmp_path))
+    bad = [
+        {"db.compute.slots": "0"},                 # int must be >= 1
+        {"db.compute.issue_ratio": "1.5"},         # ratio must be in [0, 1]
+        {"llm.ingress": "teleport"},               # unknown ingress kind
+        {"agents.initial_step.llm": "0.6"},        # weights must sum to 1
+        {"agents.initial_step.llm": "0.6",
+         "agents.initial_step.db": "0.7"},
+        {"db.storage.backend": "tape"},            # unknown backend preset
+    ]
+    for ovr in bad:
+        r = client.post("/live/run", json={
+            "scenario": "sanity/sanity_single.yaml", "overrides": ovr})
+        assert r.status_code == 422, (ovr, r.json())
+    # and the grounded scenario's own ssd_enterprise preset is now a VALID
+    # override value (it used to be rejected: BACKENDS missed the registry)
+    good = client.post("/live/run", json={
+        "scenario": "sanity/sanity_single.yaml",
+        "overrides": {"sim.until": 10,
+                      "db.storage.backend": "ssd_enterprise",
+                      "agents.initial_step.llm": "1.0",
+                      "agents.initial_step.db": "0.0"}})
+    assert good.status_code == 202
+    assert good.json()["config"]["db"]["storage"]["backend"] == "ssd_enterprise"
+    _wait_done(client)
+
+
+def test_first_completion_eta_forms() -> None:
+    """The ETA is config-computable (tokens/rates + slot concurrency);
+    non-estimable configs honestly report None (no fabricated number).
+    Both regimes are pinned: the fair-share case (grounded_70b at 4 slots
+    predicts ~11, matching the observed first completion) and the phase-
+    floor case (fixed tokens, one slot)."""
+    from omegaconf import OmegaConf as OC
+
+    from agent_db_sim.viz.live import _display_cfg
+
+    base = {"agents": {"count": 24,
+                       "input_tokens": {"distribution": "lognormal",
+                                        "mean": 11.0, "sigma": 0.6},
+                       "output_tokens": {"distribution": "lognormal",
+                                         "mean": 7.36, "sigma": 1.0}},
+            "llm": {"input_tokens_per_s": 8000, "output_tokens_per_s": 2000},
+            "db": {"topology": "centralized"}}
+    four = OC.create(dict(base, llm=dict(base["llm"], slots=4)))
+    assert 8.0 <= _display_cfg(four)["llm"]["first_completion_eta"] <= 14.0
+    wide = OC.create(dict(base, llm=dict(base["llm"], slots=32)))
+    assert 25.0 <= _display_cfg(wide)["llm"]["first_completion_eta"] <= 60.0
+    # more concurrency must stretch the first completion, not shrink it
+    assert (_display_cfg(wide)["llm"]["first_completion_eta"]
+            > _display_cfg(four)["llm"]["first_completion_eta"])
+
+    unknown = OC.create({"agents": {"count": 2},
+                         "llm": {"slots": 2, "input_tokens_per_s": 100,
+                                 "output_tokens_per_s": 50},
+                         "db": {"topology": "centralized"}})
+    assert _display_cfg(unknown)["llm"]["first_completion_eta"] is None

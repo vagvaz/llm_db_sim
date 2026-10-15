@@ -88,7 +88,8 @@
         <h2>playback</h2>
       </div>
       <div class="speed" id="speed">
-        <button data-s="1" class="on">1×</button>
+        <button data-s="auto" class="on" title="AUTO pace: replay the whole run in ~30 s wall">auto ×1.0</button>
+        <button data-s="1">1×</button>
         <button data-s="2">2×</button>
         <button data-s="5">5×</button>
         <button data-s="20">20×</button>
@@ -97,14 +98,19 @@
       <div class="legend">
         <p><i class="sw queued"></i>queued <i class="sw processing"></i>processing
           <i class="sw completed"></i>done <i class="sw transfer"></i>in flight</p>
-        <p class="hint">cylinders are queues (depth), bars are slot occupancy,
-          dots are requests riding the wiring. The view plays streamed samples
-          on its own sim-clock; token counters pace billed tokens at the
-          endpoint's configured tok/s and snap to exact totals at the end.
-          The agent badges label the closed-loop wait (<b>thinking</b> =
-          inference response pending, <b>querying</b> = db response pending)
-          with elapsed sim time, so a waiting agent never reads as stuck. The
-          bottom panel traces every queue/occupancy signal as a live waveform.
+        <p class="hint"><b>AUTO</b> picks a replay pace so the whole run
+          renders in ~30 s wall (the buttons after it are manual overrides;
+          <b>max</b> drains the stream instantly). Click a card's <b>✎</b> to
+          change that component's slots / rates / ingress / ceilings and
+          RE-LAUNCH on top of the scenario. Cylinders are queues (counters
+          inside the body), bars are slot occupancy, dots are requests riding
+          the wiring; token counters pace billed tokens at the endpoint's
+          configured tok/s and snap to exact totals at the end. The agent
+          badges label the closed-loop wait (<b>thinking</b> = inference
+          response pending, <b>querying</b> = db response pending), and while
+          a heavy prefill serves nothing the LLM card says so with the
+          config-computable ETA. The bottom panel traces queue/occupancy
+          signals as a windowed waveform scrolling with the playhead.
           <b>LIVE</b> = the server run is running, <b>REPLAY</b> = playback of
           a finished run.</p>
       </div>
@@ -114,6 +120,8 @@
     <section class="stage" id="stage">
       <svg id="topo" viewBox="0 0 1300 720" preserveAspectRatio="xMidYMid meet"></svg>
       <div id="tooltip" class="tooltip hidden"></div>
+      {# per-component edit form: rendered by live.js from the init editor schema #}
+      <div id="compedit" class="comp-editor hidden"></div>
     </section>
   </main>
 

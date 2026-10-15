@@ -179,11 +179,16 @@ svg#topo { width: 100%; height: 100%; min-height: 420px; display: block; }
 .node rect, .node path { fill: #16202e; stroke: var(--line); stroke-width: 1; }
 .node.active rect, .node.active path { stroke: var(--cyan); }
 .node text { fill: var(--ink); font-family: inherit; }
-.n-title { font-size: 15px; letter-spacing: .06em; }
+.n-title { font-size: 14px; letter-spacing: .05em; }
 .n-sub { font-size: 10px; fill: var(--dim); letter-spacing: .08em; text-transform: uppercase; }
+/* capability chips keep their lowercase spelling (ssd_enterprise reads
+   better than a 14-char uppercase run that used to collide with titles) */
+.n-chip { font-size: 9.5px; fill: var(--dim); letter-spacing: .04em; }
 .n-val { font-size: 11px; fill: var(--cyan); }
-.edge { stroke: var(--line); stroke-width: 1.4; fill: none; }
-.edge.hot { stroke: var(--violet); }
+.n-phase { font-size: 9.5px; fill: var(--amber); letter-spacing: .04em; }
+/* links: a visible low-level idle style — near-invisible grey read as dead */
+.edge { stroke: #35465f; stroke-width: 1.5; fill: none; }
+.edge.hot { stroke: var(--violet); stroke-width: 2.1; }
 .linklabel { font-size: 9px; fill: var(--dim); text-transform: uppercase;
   letter-spacing: .1em; }
 .state-dot { stroke: #0b0e13; stroke-width: 1; }
@@ -192,6 +197,13 @@ svg#topo { width: 100%; height: 100%; min-height: 420px; display: block; }
 .cyl-body { fill: #101826; stroke: var(--line); }
 .cyl-top { fill: #1a2636; stroke: var(--line); }
 .cyl-fill { fill: url(#qgrad); opacity: .9; }
+/* queue counter moved INSIDE the cylinder body (stroke halo keeps it
+   legible over the amber fill); the old big value under the cylinder
+   collided with card titles */
+.cyl-val { font-size: 10px; fill: var(--cyan); stroke: #0b0e13;
+  stroke-width: 3px; paint-order: stroke; }
+.cyl-lab { font-size: 8.5px; fill: #5b6b81; letter-spacing: .1em;
+  text-transform: uppercase; }
 .badge text { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .n-badge { font-size: 9.5px; letter-spacing: .04em; fill: #5b6b81; }
 .req-dot { stroke: none; }
@@ -199,6 +211,13 @@ svg#topo { width: 100%; height: 100%; min-height: 420px; display: block; }
 .frame-note { font-size: 10px; fill: #35435a; letter-spacing: .22em; text-transform: uppercase; }
 .standby { font-size: 15px; fill: #46566e; letter-spacing: .28em; text-transform: uppercase; }
 .standby-sub { font-size: 10px; fill: #35435a; letter-spacing: .12em; }
+
+/* ✎ edit affordance on every component card */
+.edit-aff { cursor: pointer; }
+.edit-aff rect { fill: #1b2534; stroke: #35465f; stroke-width: 1; }
+.edit-aff text { fill: var(--dim); font-size: 11px; }
+.edit-aff:hover rect { stroke: var(--cyan); fill: #223049; }
+.edit-aff:hover text { fill: var(--cyan); }
 
 /* -- wave panel (live d3-wave queue signals) --------------------------- */
 .wave-panel { border-top: 1px solid var(--line);
@@ -228,3 +247,58 @@ svg#topo { width: 100%; height: 100%; min-height: 420px; display: block; }
   padding: .4rem .6rem; font-size: .72rem; color: var(--ink);
   box-shadow: 0 6px 18px -6px #000; max-width: 260px; line-height: 1.45;
 }
+
+/* -- per-component ✎ editor (opens over the stage, anchored top-right) -- */
+.comp-editor {
+  position: absolute; top: 1.1rem; right: 1.2rem; z-index: 7;
+  width: 280px; max-height: calc(100% - 2.2rem); overflow-y: auto;
+  background: linear-gradient(180deg, #131c29, #0e1521);
+  border: 1px solid var(--cyan); border-radius: 8px;
+  box-shadow: 0 14px 40px -12px #000, 0 0 24px -8px #4cc9f044;
+  padding: .8rem .95rem 1rem;
+}
+.ce-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: .82rem; letter-spacing: .08em; color: var(--cyan);
+  text-transform: uppercase; margin-bottom: .15rem;
+}
+.ce-x {
+  font: inherit; background: none; border: 0; color: var(--dim);
+  cursor: pointer; padding: 0 .1rem; line-height: 1;
+}
+.ce-x:hover { color: var(--red); }
+.ce-sub { font-size: .66rem; color: #66748a; margin-bottom: .6rem;
+  line-height: 1.4; }
+.ce-fld { display: flex; align-items: center; justify-content: space-between;
+  gap: .6rem; margin: .35rem 0; }
+.ce-fld span { font-size: .68rem; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--dim); }
+.ce-fld em { font-style: normal; font-size: .8rem; color: var(--ink);
+  text-align: right; }
+.ce-fld input, .ce-fld select {
+  width: 128px; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 4px; padding: .3rem .45rem;
+  font: inherit; font-size: .8rem; text-align: right;
+}
+.ce-fld select { text-align: left; }
+.ce-fld input:focus, .ce-fld select:focus { outline: none;
+  border-color: var(--cyan); box-shadow: 0 0 0 1px var(--cyan); }
+.ce-msg { font-size: .7rem; color: var(--red); min-height: 1em;
+  margin-top: .5rem; line-height: 1.4; word-break: break-word; }
+.ce-msg.ok { color: var(--green); }
+.ce-acts { display: flex; gap: .5rem; margin-top: .5rem; }
+button.ce-go {
+  flex: 1; font: inherit; font-size: .72rem; letter-spacing: .06em;
+  text-transform: uppercase; padding: .5rem .4rem; cursor: pointer;
+  color: #06220f; background: linear-gradient(180deg, #4be39a, #2bb877);
+  border: 0; border-radius: 5px;
+}
+button.ce-go:hover { filter: brightness(1.1); }
+button.ce-go:disabled { background: var(--line); color: var(--dim);
+  cursor: wait; }
+button.ce-cancel {
+  font: inherit; font-size: .72rem; color: var(--dim); background: none;
+  border: 1px solid var(--line); border-radius: 5px; padding: .5rem .6rem;
+  cursor: pointer;
+}
+button.ce-cancel:hover { color: var(--ink); border-color: var(--dim); }

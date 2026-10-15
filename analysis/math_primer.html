@@ -64,6 +64,7 @@
   <a href="#s8">8 · DES/MC</a>
   <a href="#s9">9 · verification</a>
   <a href="#ex">examples</a>
+  <a href="#app">applications</a>
   <a href="#refs">references</a>
 </nav>
 
@@ -391,8 +392,133 @@
     full bar. That reasoning is what the bottleneck tile automates.</p>
 </section>
 
+
+<section id="app">
+  <h2>11 · Detailed applications</h2>
+  <p>Four worked capacity questions, each one solved from parameters to decision. Every number below
+    was produced by the verified engine in <code>core.js</code>, so the same settings on the analyzer
+    page reproduce them exactly. Formulas are shown with the numbers already substituted.</p>
+
+  <h3>Application A. How many agents fit under a p95 = 8 s latency budget?</h3>
+  <p>The question. A product wants at least 95% of agent cycles to finish within 8 seconds. Current
+    settings: 8 agents, think time 2 s, LLM calls of 1.5 s on 4 servers, DB queries of 0.3 s on
+    8 servers, both services exponential.</p>
+  <p>The math, step by step.</p>
+  <ul>
+    <li>The closed loop constrains throughput. Every agent completes a cycle in T seconds, so
+      X = N / T. The engine solves the self-consistent value. At N = 8 it returns
+      X = 2.0127 cycles/s and T = 3.9747 s, and the check 8 / 3.9747 = 2.0127 closes the loop.</li>
+    <li>The LLM station sees arrivals at rate X. Offered load a = X·τ = 2.0127 × 1.5 = 3.0191,
+      per-server load ρ = a / c = 3.0191 / 4 = 0.755. Little's Law converts occupancy to time:
+      R<sub>LLM</sub> = L<sub>LLM</sub> / X = 3.371 / 2.0127 = 1.675 s, so the pure wait is
+      Wq = R − τ = 1.675 − 1.5 = 0.175 s. The DB station sits at ρ = 0.075 with Wq = 0.</li>
+    <li>The open-chain formula at the same load would say π = C(4, 3.0191) = 0.5175 of arrivals
+      find all servers busy. The closed chain is calmer, its calibrated value is
+      π̂ = μ̂·Wq = (4 / 1.5) × 0.1747 = 0.466. That π̂, with tail rate μ̂ = c/τ = 2.667 per second,
+      builds the wait mixture from Example 5.</li>
+    <li>Convolve think time with both station mixtures and read the percentiles:
+      p50 = 3.36 s, p90 = 6.58 s, p95 = 7.97 s, p99 = 11.19 s, mean 3.96 s.</li>
+  </ul>
+  <p>Cross-check with simulation. 50000 Monte Carlo cycles at seed 7 give X = 2.0086 (0.2% from
+    analytic), p50 = 3.43 s, p95 = 8.89 s, p99 = 12.45 s. The mean matches, the upper percentiles
+    run about 9% higher, matching the documented ±10-15% band for the analytic tail.</p>
+  <p>The decision. Sweep N and compare analytic p95 against the 8 s budget:</p>
+  <table>
+    <thead><tr><th>N agents</th><th>4</th><th>6</th><th>8</th><th>10</th><th>12</th><th>14</th><th>16</th><th>20</th></tr></thead>
+    <tbody><tr><td>p95 (s)</td><td>7.77</td><td>7.81</td><td>7.97</td><td>8.28</td><td>8.96</td><td>10.15</td><td>11.76</td><td>15.61</td></tr></tbody>
+  </table>
+  <p>Analytic says N = 8 is the last count under budget, and the Monte Carlo p95 of 8.89 s warns
+    that N = 8 is already at the edge. N = 12 fails the budget at ρ = 0.954. Buying headroom instead
+    of shrinking N: raise the LLM servers from 4 to 6, which drops ρ to 0.526 and p95 to 7.77 s.</p>
+  <svg viewBox="0 0 560 150" style="max-width:560px">
+    <g font-family="ui-monospace,Menlo,monospace" font-size="11">
+      <line x1="40" y1="120" x2="540" y2="120" stroke="var(--border)"/>
+      <line x1="40" y1="15" x2="40" y2="120" stroke="var(--border)"/>
+      <line x1="40" y1="96" x2="540" y2="96" stroke="var(--bad)" stroke-width="1" stroke-dasharray="4 4"/>
+      <text x="480" y="108" fill="var(--bad)">8s budget</text>
+      <polyline points="40,110 102,108 165,101 227,86 290,58 352,38 415,31 540,19" fill="none" stroke="var(--accent)" stroke-width="2"/>
+      <text x="165" y="117" text-anchor="middle" fill="var(--accent2)">N=8</text>
+      <text x="290" y="117" text-anchor="middle" fill="var(--muted)">12</text>
+      <text x="415" y="117" text-anchor="middle" fill="var(--muted)">16</text>
+      <text x="8" y="30" fill="var(--muted)">16s</text>
+      <text x="8" y="99" fill="var(--muted)">8s</text>
+      <text x="8" y="123" fill="var(--muted)">0</text>
+    </g>
+  </svg>
+  <p>Reproduce on the page. Defaults as shipped, sweep chart for the curve, compare tab for the
+    analytic versus Monte Carlo columns.</p>
+
+  <h3>Application B. Splitting the DB into compute and storage. When does it matter?</h3>
+  <p>The question. The roadmap decomposes the DB endpoint into a compute node and a storage node.
+    Does the split change anything the user sees?</p>
+  <p>Case B1, mild traffic. Keep total DB service at 0.3 s and split it into 0.18 s compute plus
+    0.12 s storage, each with 4 servers. The engine returns X = 2.01274 versus 2.0127 for the single
+    node, and the same T. The two new stations run at ρ = 0.091 and ρ = 0.060 with zero wait. Math
+    reason. Splitting a service time across two stations with spare capacity preserves the total
+    work in the cycle, X = N / T is blind to how the 0.3 s is divided, and no new queue forms.</p>
+  <p>Case B2, spiky storage. Replace storage with τ = 0.25 s, 2 servers, SCV 4. Allen-Cunneen
+    correction (1 + 4) / 2 = 2.5 lifts the wait, storage reaches ρ = 0.244, Wq = 0.026 s, and the
+    loop slows: X = 1.953, p50 3.49 s, p95 8.10 s, p99 11.32 s. The arrival occupancy chart shows
+    the queue arriving at the storage node, which was invisible in B1.</p>
+  <p>The takeaway. Decomposition changes results only when one piece becomes the bottleneck. Use the
+    per-station table after every split, and check which row has the largest ρ.</p>
+
+  <h3>Application C. Where the analytic model bends, and when to trust the simulation</h3>
+  <p>The question. The analytic engine approximates tails. Under which settings does that bite?</p>
+  <p>Experiment 1, jitter on an idle station. Set the DB service SCV to 3 while the DB sits at
+    ρ = 0.075. Analytic p95 = 7.97 s, Monte Carlo p95 = 8.92 s, and the wait stays at zero either
+    way. Turning the jitter dial on a station with spare capacity changes nothing. Spend attention
+    on the busy row of the table.</p>
+  <p>Experiment 2, jitter on the bottleneck. Set the LLM service SCV and compare both engines.</p>
+  <table>
+    <thead><tr><th>LLM SCV</th><th>correction (1+c²)/2</th><th>Wq analytic</th><th>p95 analytic</th><th>p95 Monte Carlo</th><th>p99 analytic</th><th>p99 Monte Carlo</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td>0.50</td><td>0.087 s</td><td>7.87 s</td><td>7.97 s</td><td>11.09 s</td><td>11.23 s</td></tr>
+      <tr><td>1</td><td>1.00</td><td>0.175 s</td><td>7.97 s</td><td>8.96 s</td><td>11.19 s</td><td>12.33 s</td></tr>
+      <tr><td>3</td><td>2.00</td><td>0.349 s</td><td>8.15 s</td><td>10.55 s</td><td>11.37 s</td><td>16.15 s</td></tr>
+    </tbody>
+  </table>
+  <p>Reading the table. At SCV 0 both engines agree within 0.2 s. At SCV 3 the analytic p99 reports
+    11.37 s while simulation measures 16.15 s, a 42% miss. The Allen-Cunneen factor corrects the
+    mean wait, not the tail shape, and the calibrated mixture spreads that corrected mean with an
+    exponential tail that spiky service times outrun.</p>
+  <p>The rule. Use analytic for means, throughput, and quick comparisons at SCV up to about 1.
+    Use the Monte Carlo tab for tail percentiles whenever the bottleneck carries SCV above 1.</p>
+
+  <h3>Application D. The throughput ceiling, and why more agents stop helping</h3>
+  <p>The question. How much throughput can this configuration ever deliver, past which agents only
+    queue?</p>
+  <p>The math. The loop cannot push more work through a station than its servers allow, so
+    X has a hard ceiling of min(c/τ) across stations, here min(4/1.5, 8/0.3) = 2.667 cycles/s.
+    The engine's sweep shows throughput approaching that line.</p>
+  <table>
+    <thead><tr><th>N agents</th><th>4</th><th>6</th><th>8</th><th>10</th><th>12</th><th>14</th><th>16</th><th>20</th></tr></thead>
+    <tbody><tr><td>X (cycles/s)</td><td>1.05</td><td>1.56</td><td>2.01</td><td>2.35</td><td>2.54</td><td>2.63</td><td>2.66</td><td>2.67</td></tr></tbody>
+  </table>
+  <p>Between N = 8 and N = 16 each added agent buys 32% more throughput. From N = 16 to N = 20 it
+    buys 0%. Everything past the knee converts agents into queue depth. The saturation sweep draws
+    this, and the bottleneck tile names the station holding the ceiling, which here is the LLM at
+    4 servers.</p>
+  <svg viewBox="0 0 560 140" style="max-width:560px">
+    <g font-family="ui-monospace,Menlo,monospace" font-size="11">
+      <line x1="40" y1="115" x2="540" y2="115" stroke="var(--border)"/>
+      <line x1="40" y1="15" x2="40" y2="115" stroke="var(--border)"/>
+      <line x1="40" y1="28" x2="540" y2="28" stroke="var(--warn)" stroke-width="1" stroke-dasharray="4 4"/>
+      <text x="46" y="24" fill="var(--warn)">ceiling 2.667 = c/τ</text>
+      <polyline points="40,86 165,61 290,37 415,29 540,28" fill="none" stroke="var(--accent)" stroke-width="2"/>
+      <text x="40" y="132" fill="var(--muted)">N=4</text>
+      <text x="290" y="132" text-anchor="middle" fill="var(--muted)">N=12</text>
+      <text x="530" y="132" text-anchor="end" fill="var(--muted)">N=20</text>
+      <text x="12" y="30" fill="var(--muted)">X</text>
+    </g>
+  </svg>
+  <p>Reproduce on the page. Push the sweep max agents up to 60 and watch X flatten against the
+    ceiling while the p95 column keeps climbing.</p>
+
+</section>
+
 <section id="refs">
-  <h2>11 · References & digital views</h2>
+  <h2>12 · References & digital views</h2>
   <p>Each row: what the work established → where we use it → link(s). Links verified; tags show
      <span class="tag free">free access</span>/<span class="tag pay">paywalled</span>.</p>
   <table>
